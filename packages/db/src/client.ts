@@ -90,15 +90,30 @@ export function databaseUrlFromEnv(env: NodeJS.ProcessEnv = process.env): string
 }
 
 /**
+ * Hosts reached over a private network rather than the public internet.
+ *
+ * Railway, Render and Fly all expose managed Postgres on an internal address
+ * whose traffic never leaves their network, and whose Postgres does not
+ * terminate TLS. Demanding TLS there does not fail closed in a useful way — it
+ * simply cannot connect, which on a deploy looks like the pre-deploy migration
+ * failing for no stated reason.
+ */
+const PRIVATE_HOST = /@(localhost|127\.0\.0\.1|\[::1\]|[^@/]*\.(railway\.internal|internal|local))[:/]/;
+
+/**
  * Whether TLS should be required.
  *
- * On by default, off only for an explicitly local database. Defaulting the
- * other way would mean forgetting one environment variable silently sends
- * credentials in clear text.
+ * On by default and off only for a local or private-network host. Defaulting
+ * the other way would mean that forgetting one environment variable silently
+ * sends credentials over the public internet in clear text, which is the more
+ * expensive mistake of the two.
+ *
+ * `DATABASE_SSL=false` overrides, for a host this cannot recognise.
  */
 export function shouldUseSsl(url: string, env: NodeJS.ProcessEnv = process.env): boolean {
   if (env['DATABASE_SSL'] === 'false') return false;
-  return !/@(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(url);
+  if (env['DATABASE_SSL'] === 'true') return true;
+  return !PRIVATE_HOST.test(url);
 }
 
 /** Whether the database is reachable and responsive. Used by the readiness probe. */
