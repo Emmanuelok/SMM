@@ -440,13 +440,55 @@ function validateFeatures(
     );
   }
 
-  if (target.poll !== undefined && !cap.features.includes('poll')) {
+  // A poll the network cannot post is only an error when there is no fallback.
+  // Where reminder delivery can carry it, the trigger handles it instead.
+  const pollFallsBackToReminder = (cap.reminderTriggers ?? []).includes('poll_attached');
+  if (target.poll !== undefined && !cap.features.includes('poll') && !pollFallsBackToReminder) {
     issues.push(issue('feature_unsupported', 'error', `${network} does not support polls.`, {
       field: 'poll',
     }));
   }
 
   return issues;
+}
+
+/**
+ * Which of this network's reminder triggers this particular post trips.
+ *
+ * Returns user-facing explanations rather than trigger names, because the
+ * message is the whole value: "add the link sticker yourself" is actionable,
+ * "any_sticker" is not.
+ */
+function reminderTriggersFor(
+  target: ResolvedTarget,
+  cap: FormatCapability,
+  network: string,
+): string[] {
+  const triggers = cap.reminderTriggers ?? [];
+  const reasons: string[] = [];
+
+  if (
+    triggers.includes('any_sticker') &&
+    target.stickers !== undefined &&
+    target.stickers.length > 0
+  ) {
+    const kinds = [...new Set(target.stickers.map((s) => s.kind))].join(', ');
+    reasons.push(
+      `${network} has no API for stickers (${kinds}), so this post will be sent to you as a reminder to publish by hand.`,
+    );
+  }
+
+  if (triggers.includes('native_audio') && target.nativeAudio !== undefined) {
+    reasons.push(
+      `${network} does not open its audio library to other apps, so a post using a track from it has to be published in the app. Mixing the audio into the video file instead lets it publish automatically.`,
+    );
+  }
+
+  if (triggers.includes('poll_attached') && target.poll !== undefined) {
+    reasons.push(`${network} has no API for polls, so this post needs to be published by hand.`);
+  }
+
+  return reasons;
 }
 
 /**
@@ -483,15 +525,21 @@ export function validateTarget(
     ...validateFeatures(target, cap, networkName),
   ];
 
-  if (cap.delivery === 'reminder') {
+  const forced = reminderTriggersFor(target, cap, networkName);
+  const effectiveDelivery: 'auto' | 'reminder' =
+    cap.delivery === 'reminder' || forced.length > 0 ? 'reminder' : 'auto';
+
+  if (effectiveDelivery === 'reminder') {
+    const explanation =
+      forced.length > 0
+        ? forced.join(' ')
+        : (cap.limitationNote ??
+          `${networkName} cannot publish this automatically. You will get a reminder to post it at the scheduled time.`);
     issues.unshift(
-      issue(
-        'delivery_is_reminder',
-        'info',
-        cap.limitationNote ??
-          `${networkName} cannot publish this automatically. You will get a reminder to post it at the scheduled time.`,
-        { field: 'format', autoFix: { kind: 'switch_delivery', to: 'reminder' } },
-      ),
+      issue('delivery_is_reminder', 'info', explanation, {
+        field: 'format',
+        autoFix: { kind: 'switch_delivery', to: 'reminder' },
+      }),
     );
   }
 
@@ -500,6 +548,6 @@ export function validateTarget(
   return {
     issues,
     publishable: !blocked,
-    delivery: blocked ? 'blocked' : cap.delivery === 'reminder' ? 'reminder' : 'auto',
+    delivery: blocked ? 'blocked' : effectiveDelivery,
   };
 }

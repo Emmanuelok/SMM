@@ -28,7 +28,7 @@ const FEED_IMAGE: ImageSpec = {
   minWidth: 320,
   minHeight: 320,
   maxWidth: 1440,
-  maxHeight: 1800,
+  maxHeight: 1440,
   minAspectRatio: 0.8, // 4:5 portrait
   maxAspectRatio: 1.91, // 1.91:1 landscape
   mimeTypes: JPEG_PNG,
@@ -113,8 +113,17 @@ export const INSTAGRAM: PlatformCapabilities = {
         maxHashtags: 30,
         linksClickable: false,
       },
-      media: { minCount: 1, maxCount: 1, mixedTypesAllowed: false, video: VERTICAL_VIDEO },
+      media: {
+        minCount: 1,
+        maxCount: 1,
+        mixedTypesAllowed: false,
+        // The API accepts 0.01:1 to 10:1; 9:16 is a recommendation, not a rule.
+        video: { ...VERTICAL_VIDEO, minAspectRatio: 0.01, maxAspectRatio: 10 },
+      },
       features: ['first_comment', 'location_tag', 'user_tag', 'product_tag', 'collaborator_tag', 'custom_thumbnail'],
+      // Audio baked into the file is fine; a track from Instagram's catalogue
+      // is not, and that is what most trending Reels use.
+      reminderTriggers: ['native_audio'],
     },
     {
       format: 'story',
@@ -130,9 +139,13 @@ export const INSTAGRAM: PlatformCapabilities = {
         maxCount: 1,
         mixedTypesAllowed: false,
         image: { ...FEED_IMAGE, minAspectRatio: 0.5, maxAspectRatio: 0.6 },
-        video: { ...VERTICAL_VIDEO, maxDurationSec: 60 },
+        video: { ...VERTICAL_VIDEO, maxDurationSec: 60, maxBytes: 100 * MB },
       },
       features: [],
+      // Plain Stories publish fine; every interactive element forces the
+      // reminder path. This is the single largest source of manual publishing
+      // in the product, because Stories are Instagram's most-used format.
+      reminderTriggers: ['any_sticker', 'native_audio', 'poll_attached'],
       limitationNote:
         'Instagram publishes plain image and video Stories through the API, but link stickers, polls, questions, music and other interactive stickers cannot be added programmatically.',
     },
@@ -172,7 +185,7 @@ export const FACEBOOK: PlatformCapabilities = {
       format: 'image',
       delivery: 'auto',
       text: { maxLength: 63_206, counting: { kind: 'grapheme' }, required: false, linksClickable: true },
-      media: { minCount: 1, maxCount: 1, mixedTypesAllowed: false, image: { ...FEED_IMAGE, maxBytes: 10 * MB, maxWidth: 2048, maxHeight: 2048, minAspectRatio: 0.1, maxAspectRatio: 10 } },
+      media: { minCount: 1, maxCount: 1, mixedTypesAllowed: false, image: { ...FEED_IMAGE, maxBytes: 4 * MB, maxWidth: 2048, maxHeight: 2048, minAspectRatio: 0.1, maxAspectRatio: 10 } },
       features: ['first_comment', 'alt_text', 'location_tag', 'link_in_body', 'native_scheduling'],
     },
     {
@@ -183,7 +196,7 @@ export const FACEBOOK: PlatformCapabilities = {
         minCount: 1,
         maxCount: 1,
         mixedTypesAllowed: false,
-        video: { ...VERTICAL_VIDEO, maxBytes: 4096 * MB, maxDurationSec: 14_400, minAspectRatio: 0.5, maxAspectRatio: 1.78 },
+        video: { ...VERTICAL_VIDEO, maxBytes: 10_240 * MB, maxDurationSec: 14_400, minAspectRatio: 0.1, maxAspectRatio: 10 },
       },
       features: ['first_comment', 'custom_thumbnail', 'link_in_body', 'native_scheduling'],
     },
@@ -229,7 +242,7 @@ export const THREADS: PlatformCapabilities = {
       format: 'carousel',
       delivery: 'auto',
       text: { maxLength: 500, counting: { kind: 'grapheme' }, required: false, linksClickable: true },
-      media: { minCount: 2, maxCount: 20, mixedTypesAllowed: true, image: FEED_IMAGE, video: VERTICAL_VIDEO },
+      media: { minCount: 2, maxCount: 20, mixedTypesAllowed: true, image: { ...FEED_IMAGE, minAspectRatio: 0.01, maxAspectRatio: 10 }, video: { ...VERTICAL_VIDEO, maxDurationSec: 300, minAspectRatio: 0.01, maxAspectRatio: 10 } },
       features: ['alt_text', 'link_in_body'],
     },
   ],
@@ -278,7 +291,7 @@ export const X: PlatformCapabilities = {
         required: false,
         linksClickable: true,
       },
-      media: { minCount: 1, maxCount: 4, mixedTypesAllowed: false, image: { ...FEED_IMAGE, maxBytes: 5 * MB, minAspectRatio: 0.1, maxAspectRatio: 10, mimeTypes: JPEG_PNG_WEBP } },
+      media: { minCount: 1, maxCount: 4, mixedTypesAllowed: false, image: { ...FEED_IMAGE, maxBytes: 5 * MB, minWidth: 4, minHeight: 4, maxWidth: 8192, maxHeight: 8192, minAspectRatio: 0.1, maxAspectRatio: 10, mimeTypes: JPEG_PNG_WEBP } },
       features: ['alt_text', 'link_in_body', 'reply_controls'],
     },
     {
@@ -290,7 +303,7 @@ export const X: PlatformCapabilities = {
         required: false,
         linksClickable: true,
       },
-      media: { minCount: 1, maxCount: 1, mixedTypesAllowed: false, video: { ...VERTICAL_VIDEO, maxBytes: 512 * MB, maxDurationSec: 140, minAspectRatio: 0.33, maxAspectRatio: 3 } },
+      media: { minCount: 1, maxCount: 1, mixedTypesAllowed: false, video: { ...VERTICAL_VIDEO, maxBytes: 512 * MB, minDurationSec: 0.5, maxDurationSec: 140, minWidth: 32, minHeight: 32, minAspectRatio: 0.33, maxAspectRatio: 3 } },
       features: ['alt_text', 'link_in_body', 'reply_controls'],
     },
     {
@@ -315,7 +328,7 @@ export const LINKEDIN: PlatformCapabilities = {
     'https://learn.microsoft.com/en-us/linkedin/marketing/',
     'research/06-platform-apis-tier1.md',
   ],
-  publishing: { rejectsDuplicateContent: false },
+  publishing: { maxPostsPer24h: 150, rejectsDuplicateContent: false },
   read: {
     comments: true,
     // LinkedIn exposes no generic messaging permission to third parties at all.
@@ -339,14 +352,14 @@ export const LINKEDIN: PlatformCapabilities = {
       format: 'image',
       delivery: 'auto',
       text: { maxLength: 3000, counting: { kind: 'grapheme' }, required: false, linksClickable: true },
-      media: { minCount: 1, maxCount: 20, mixedTypesAllowed: false, image: { ...FEED_IMAGE, maxBytes: 10 * MB, minAspectRatio: 0.1, maxAspectRatio: 10 } },
+      media: { minCount: 1, maxCount: 20, mixedTypesAllowed: false, image: { ...FEED_IMAGE, maxBytes: 10 * MB, maxWidth: 7680, maxHeight: 7680, minAspectRatio: 0.1, maxAspectRatio: 10 } },
       features: ['alt_text', 'link_in_body'],
     },
     {
       format: 'video',
       delivery: 'auto',
       text: { maxLength: 3000, counting: { kind: 'grapheme' }, required: false, linksClickable: true },
-      media: { minCount: 1, maxCount: 1, mixedTypesAllowed: false, video: { ...VERTICAL_VIDEO, maxBytes: 5120 * MB, maxDurationSec: 1800, minAspectRatio: 0.4, maxAspectRatio: 2.4 } },
+      media: { minCount: 1, maxCount: 1, mixedTypesAllowed: false, video: { ...VERTICAL_VIDEO, maxBytes: 500 * MB, maxDurationSec: 1800, minWidth: 256, minHeight: 144, minAspectRatio: 0.417, maxAspectRatio: 2.4 } },
       features: ['custom_thumbnail', 'link_in_body'],
     },
     {
@@ -390,8 +403,9 @@ export const TIKTOK: PlatformCapabilities = {
       format: 'reel',
       delivery: 'auto',
       text: { maxLength: 2200, counting: { kind: 'grapheme' }, required: false, linksClickable: false },
-      media: { minCount: 1, maxCount: 1, mixedTypesAllowed: false, video: { ...VERTICAL_VIDEO, maxDurationSec: 600 } },
+      media: { minCount: 1, maxCount: 1, mixedTypesAllowed: false, video: { ...VERTICAL_VIDEO, maxBytes: 4096 * MB, maxDurationSec: 600, minAspectRatio: 0.1, maxAspectRatio: 10 } },
       features: ['custom_thumbnail', 'reply_controls'],
+      reminderTriggers: ['native_audio', 'any_sticker', 'poll_attached'],
       limitationNote:
         'TikTok has no API for its sound library, stickers, polls or Q&A; posts needing those must be published manually.',
     },
@@ -399,7 +413,7 @@ export const TIKTOK: PlatformCapabilities = {
       format: 'carousel',
       delivery: 'auto',
       text: { maxLength: 2200, counting: { kind: 'grapheme' }, required: false, linksClickable: false },
-      media: { minCount: 1, maxCount: 35, mixedTypesAllowed: false, image: { ...FEED_IMAGE, minAspectRatio: 0.1, maxAspectRatio: 10 } },
+      media: { minCount: 1, maxCount: 35, mixedTypesAllowed: false, image: { ...FEED_IMAGE, maxBytes: 20 * MB, minAspectRatio: 0.1, maxAspectRatio: 10, mimeTypes: ['image/jpeg', 'image/webp'] } },
       features: ['reply_controls'],
     },
   ],
@@ -437,7 +451,7 @@ export const YOUTUBE: PlatformCapabilities = {
         linksClickable: true,
         maxTitleLength: 100,
       },
-      media: { minCount: 1, maxCount: 1, mixedTypesAllowed: false, video: { ...VERTICAL_VIDEO, maxBytes: 131_072 * MB, maxDurationSec: 43_200, minAspectRatio: 0.5, maxAspectRatio: 2 } },
+      media: { minCount: 1, maxCount: 1, mixedTypesAllowed: false, video: { ...VERTICAL_VIDEO, maxBytes: 262_144 * MB, maxDurationSec: 43_200, minAspectRatio: 0.1, maxAspectRatio: 10 } },
       features: ['title', 'custom_thumbnail', 'link_in_body', 'native_scheduling'],
     },
     {
@@ -450,7 +464,7 @@ export const YOUTUBE: PlatformCapabilities = {
         linksClickable: true,
         maxTitleLength: 100,
       },
-      media: { minCount: 1, maxCount: 1, mixedTypesAllowed: false, video: { ...VERTICAL_VIDEO, maxDurationSec: 180 } },
+      media: { minCount: 1, maxCount: 1, mixedTypesAllowed: false, video: { ...VERTICAL_VIDEO, maxBytes: 262_144 * MB, maxDurationSec: 180, maxAspectRatio: 1 } },
       features: ['title', 'custom_thumbnail', 'link_in_body', 'native_scheduling'],
     },
   ],
@@ -486,7 +500,7 @@ export const PINTEREST: PlatformCapabilities = {
         linksClickable: true,
         maxTitleLength: 100,
       },
-      media: { minCount: 1, maxCount: 1, mixedTypesAllowed: false, image: { ...FEED_IMAGE, maxBytes: 20 * MB, minAspectRatio: 0.1, maxAspectRatio: 10 } },
+      media: { minCount: 1, maxCount: 5, mixedTypesAllowed: false, image: { ...FEED_IMAGE, maxBytes: 20 * MB, minAspectRatio: 0.1, maxAspectRatio: 10 } },
       features: ['title', 'alt_text', 'link_in_body'],
     },
   ],

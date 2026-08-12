@@ -84,6 +84,41 @@ export interface MediaRef {
   readonly thumbnailAssetId?: MediaAssetId | undefined;
 }
 
+/**
+ * An interactive overlay on an ephemeral post.
+ *
+ * Stickers are the entire engagement mechanic of Instagram Stories and none of
+ * them can be applied through the API — which makes them the single largest
+ * driver of reminder-based publishing in this product.
+ */
+export interface StickerRef {
+  readonly kind:
+    | 'link'
+    | 'poll'
+    | 'question'
+    | 'quiz'
+    | 'countdown'
+    | 'location'
+    | 'mention'
+    | 'music'
+    | 'gif'
+    | 'add_yours';
+  readonly payload?: Readonly<Record<string, string>> | undefined;
+}
+
+/**
+ * Audio chosen from a network's own catalogue.
+ *
+ * Distinct from audio already mixed into the uploaded file. Meta and TikTok do
+ * not expose their music libraries to third parties for rights reasons, so a
+ * post depending on trending audio cannot be published programmatically at all
+ * — the distinction decides whether a Reel can go out automatically.
+ */
+export interface NativeAudioRef {
+  readonly remoteId: string;
+  readonly title?: string | undefined;
+}
+
 export interface PollOption {
   readonly text: string;
 }
@@ -121,6 +156,8 @@ export interface PostDraft {
   readonly locationRemoteId?: string | undefined;
   readonly taggedAccounts?: readonly string[] | undefined;
   readonly collaborators?: readonly string[] | undefined;
+  readonly stickers?: readonly StickerRef[] | undefined;
+  readonly nativeAudio?: NativeAudioRef | undefined;
 }
 
 /** A draft aimed at one connected account, with its overrides resolved. */
@@ -137,6 +174,8 @@ export interface ResolvedTarget {
   readonly locationRemoteId?: string | undefined;
   readonly taggedAccounts?: readonly string[] | undefined;
   readonly collaborators?: readonly string[] | undefined;
+  readonly stickers?: readonly StickerRef[] | undefined;
+  readonly nativeAudio?: NativeAudioRef | undefined;
 }
 
 /** Apply a target's overrides over the shared draft. */
@@ -159,5 +198,7 @@ export function resolveTarget(
     locationRemoteId: draft.locationRemoteId,
     taggedAccounts: draft.taggedAccounts,
     collaborators: draft.collaborators,
+    stickers: draft.stickers,
+    nativeAudio: draft.nativeAudio,
   };
 }

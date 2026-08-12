@@ -165,6 +165,123 @@ test('blocks polls on networks that have none', () => {
   assert.equal(report.publishable, false);
 });
 
+test('a plain Instagram Story publishes automatically', () => {
+  const report = validateTarget(
+    target({
+      format: 'story',
+      network: 'instagram',
+      media: [image({ width: 1080, height: 1920 })],
+    }),
+    INSTAGRAM,
+  );
+  assert.equal(report.delivery, 'auto');
+  assert.equal(report.publishable, true);
+});
+
+test('the same Story with a link sticker falls back to a reminder', () => {
+  // Meta exposes no sticker API, so this cannot be published programmatically
+  // even though every other part of the post is identical.
+  const report = validateTarget(
+    target({
+      format: 'story',
+      network: 'instagram',
+      media: [image({ width: 1080, height: 1920 })],
+      stickers: [{ kind: 'link', payload: { url: 'https://example.com' } }],
+    }),
+    INSTAGRAM,
+  );
+  assert.equal(report.delivery, 'reminder');
+  // Still publishable — it just goes out by hand rather than not at all.
+  assert.equal(report.publishable, true);
+
+  const note = report.issues.find((i) => i.code === 'delivery_is_reminder');
+  assert.ok(note !== undefined);
+  assert.equal(note.severity, 'info');
+  // The message must name the offending element so the user can act on it.
+  assert.match(note.message, /sticker/i);
+  assert.match(note.message, /link/i);
+});
+
+test('a Reel using catalogue audio needs a reminder; baked-in audio does not', () => {
+  const base = {
+    format: 'reel' as const,
+    network: 'instagram' as const,
+    media: [
+      image({ kind: 'video', width: 1080, height: 1920, durationSec: 20, mimeType: 'video/mp4' }),
+    ],
+  };
+
+  const bakedIn = validateTarget(target(base), INSTAGRAM);
+  assert.equal(bakedIn.delivery, 'auto');
+
+  const trending = validateTarget(
+    target({ ...base, nativeAudio: { remoteId: 'audio_123', title: 'Trending Sound' } }),
+    INSTAGRAM,
+  );
+  assert.equal(trending.delivery, 'reminder');
+  const note = trending.issues.find((i) => i.code === 'delivery_is_reminder');
+  assert.ok(note !== undefined);
+  // Should tell the user the workaround, not just that it failed.
+  assert.match(note.message, /mixing the audio into the video file/i);
+});
+
+test('a poll on TikTok degrades to a reminder rather than erroring', () => {
+  // TikTok has no poll API, but the reminder path can still carry the post,
+  // so blocking it outright would be wrong.
+  const report = validateTarget(
+    target({
+      format: 'reel',
+      network: 'tiktok',
+      media: [
+        image({ kind: 'video', width: 1080, height: 1920, durationSec: 20, mimeType: 'video/mp4' }),
+      ],
+      poll: { options: [{ text: 'a' }, { text: 'b' }], durationMinutes: 1440 },
+    }),
+    TIKTOK,
+  );
+  assert.equal(report.delivery, 'reminder');
+  assert.equal(report.publishable, true);
+});
+
+test('a network with no fallback still blocks an unsupported poll', () => {
+  const report = validateTarget(
+    target({
+      format: 'text',
+      network: 'linkedin',
+      body: 'pick one',
+      poll: { options: [{ text: 'a' }, { text: 'b' }], durationMinutes: 1440 },
+    }),
+    LINKEDIN,
+  );
+  assert.equal(report.publishable, false);
+});
+
+test('corrected media limits match the platform API research', () => {
+  // X caps images at 5 MB; a 6 MB image must be rejected.
+  const oversize = validateTarget(
+    target({ format: 'image', body: 'hi', media: [image({ bytes: 6 * 1_048_576 })] }),
+    X,
+  );
+  assert.ok(codes(oversize).includes('media_too_large'));
+
+  // A Reel is not restricted to 9:16 — the API accepts a wide range, and
+  // rejecting a square video here would block content the network allows.
+  const square = validateTarget(
+    target({
+      format: 'reel',
+      network: 'instagram',
+      media: [
+        image({ kind: 'video', width: 1080, height: 1080, durationSec: 20, mimeType: 'video/mp4' }),
+      ],
+    }),
+    INSTAGRAM,
+  );
+  assert.ok(
+    !codes(square).includes('video_aspect_ratio_invalid'),
+    'square Reels are accepted by the API',
+  );
+});
+
 test('every registered network describes at least one format', () => {
   for (const network of ['instagram', 'facebook', 'threads', 'x', 'linkedin', 'tiktok', 'youtube', 'pinterest', 'bluesky', 'google_business'] as const) {
     const caps = capabilitiesFor(network);

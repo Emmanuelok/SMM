@@ -62,12 +62,44 @@ export interface MediaCapability {
   readonly video?: VideoSpec | undefined;
 }
 
+/**
+ * A content characteristic that forces reminder-based publishing.
+ *
+ * Delivery mode is not a property of the format alone. A plain Instagram Story
+ * publishes automatically; the same Story with a link sticker cannot be
+ * published at all, because Meta exposes no sticker API. A Reel with audio
+ * mixed into the file publishes; one using a track from Instagram's catalogue
+ * cannot, because the music libraries are closed to third parties for rights
+ * reasons.
+ *
+ * Modelling these as triggers rather than baking them into the format keeps the
+ * composer honest: it can tell the user *the moment they add a link sticker*
+ * that this post will now need to be published by hand, instead of discovering
+ * it when the job fails.
+ */
+export type ReminderTrigger =
+  /** Any interactive sticker at all. */
+  | 'any_sticker'
+  /** Audio taken from the network's own catalogue. */
+  | 'native_audio'
+  /** A poll attached to a format that otherwise auto-publishes. */
+  | 'poll_attached';
+
 export interface FormatCapability {
   readonly format: PostFormat;
+  /**
+   * Delivery when nothing in `reminderTriggers` applies. The effective mode is
+   * computed per post by the validator.
+   */
   readonly delivery: DeliveryMode;
   readonly text: TextCapability;
   readonly media: MediaCapability;
   readonly features: readonly PostFeature[];
+  /**
+   * Content characteristics that downgrade this format to reminder delivery.
+   * Empty for formats whose delivery never depends on their content.
+   */
+  readonly reminderTriggers?: readonly ReminderTrigger[] | undefined;
   /**
    * Why a format is `reminder` or `unsupported`.
    *
