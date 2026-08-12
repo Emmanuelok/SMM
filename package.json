@@ -1,0 +1,25 @@
+{
+  "name": "smm",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Global AI social media management platform",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "tsc --build",
+    "typecheck:clean": "tsc --build --clean",
+    "test": "tsc --build && node --test $(find packages -path '*/dist/*' -name '*.test.js')",
+    "lint": "npm run lint --workspaces --if-present"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}
