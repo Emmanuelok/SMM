@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SMM</title>
+    <link rel="stylesheet" href="/style.css" />
+    <link rel="icon" href="data:," />
+  </head>
+  <body>
+    <noscript>This app needs JavaScript enabled.</noscript>
+
+    <!-- Only one of these is visible at a time; app.js decides which. -->
+    <main id="auth" hidden>
+      <div class="card">
+        <h1>SMM</h1>
+        <p class="muted">Schedule and publish across your social accounts.</p>
+
+        <div class="tabs" role="tablist">
+          <button id="tab-signin" class="tab" role="tab" aria-selected="true">Sign in</button>
+          <button id="tab-signup" class="tab" role="tab" aria-selected="false">Create account</button>
+        </div>
+
+        <form id="form-signin" autocomplete="on">
+          <label for="signin-email">Email</label>
+          <input id="signin-email" name="email" type="email" required autocomplete="username" />
+
+          <label for="signin-password">Password</label>
+          <input
+            id="signin-password"
+            name="password"
+            type="password"
+            required
+            autocomplete="current-password"
+          />
+
+          <button type="submit" class="primary">Sign in</button>
+        </form>
+
+        <form id="form-signup" hidden autocomplete="on">
+          <label for="signup-name">Your name</label>
+          <input id="signup-name" name="name" required autocomplete="name" />
+
+          <label for="signup-org">Company or brand</label>
+          <input id="signup-org" name="organizationName" required autocomplete="organization" />
+
+          <label for="signup-email">Email</label>
+          <input id="signup-email" name="email" type="email" required autocomplete="username" />
+
+          <label for="signup-password">Password</label>
+          <input
+            id="signup-password"
+            name="password"
+            type="password"
+            required
+            minlength="12"
+            autocomplete="new-password"
+          />
+          <p class="hint">At least 12 characters. Length matters more than symbols.</p>
+
+          <button type="submit" class="primary">Create account</button>
+        </form>
+
+        <p id="auth-error" class="error" role="alert" hidden></p>
+      </div>
+    </main>
+
+    <div id="app" hidden>
+      <header class="bar">
+        <strong>SMM</strong>
+        <span class="spacer"></span>
+        <span id="who" class="muted"></span>
+        <button id="signout" class="link">Sign out</button>
+      </header>
+
+      <div class="columns">
+        <section class="card">
+          <h2>Accounts</h2>
+          <ul id="profiles" class="list"></ul>
+          <p id="profiles-empty" class="muted" hidden>No accounts connected yet.</p>
+
+          <details id="connect">
+            <summary>Connect Bluesky</summary>
+            <div id="connect-steps" class="steps"></div>
+            <form id="form-connect">
+              <label for="connect-handle">Handle</label>
+              <input id="connect-handle" placeholder="yourname.bsky.social" required />
+
+              <label for="connect-password">App password</label>
+              <input id="connect-password" type="password" required autocomplete="off" />
+              <p class="hint">
+                An app password, not your account password. Create one in Bluesky under
+                Settings → App Passwords; you can revoke it there at any time.
+              </p>
+
+              <button type="submit" class="primary">Connect</button>
+            </form>
+            <p id="connect-error" class="error" role="alert" hidden></p>
+          </details>
+        </section>
+
+        <section class="card">
+          <h2>Compose</h2>
+          <form id="form-compose">
+            <label for="compose-body">Post</label>
+            <textarea id="compose-body" rows="5" required></textarea>
+            <p class="hint"><span id="counter">0</span> characters</p>
+
+            <label for="compose-targets">Publish to</label>
+            <select id="compose-targets" multiple size="4" required></select>
+
+            <div class="row">
+              <div>
+                <label for="compose-when">When (local time)</label>
+                <input id="compose-when" type="datetime-local" required />
+              </div>
+              <div>
+                <label for="compose-tz">Timezone</label>
+                <select id="compose-tz"></select>
+              </div>
+            </div>
+
+            <button type="submit" class="primary">Schedule</button>
+          </form>
+          <p id="compose-error" class="error" role="alert" hidden></p>
+          <p id="compose-ok" class="ok" role="status" hidden></p>
+        </section>
+      </div>
+
+      <section class="card">
+        <h2>Scheduled</h2>
+        <table id="posts-table">
+          <thead>
+            <tr>
+              <th>Post</th>
+              <th>Account</th>
+              <th>When</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="posts"></tbody>
+        </table>
+        <p id="posts-empty" class="muted" hidden>Nothing scheduled yet.</p>
+      </section>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

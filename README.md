@@ -10,9 +10,9 @@ connected to any network yet.
 
 | | |
 |---|---|
-| **Works** | Signup, login, sessions, organizations, brand containers, migrations, capability validation |
-| **Built, not wired** | Adapter contract, publish lifecycle, scheduling engine, credential vault |
-| **Not started** | Worker service, network adapters, media storage, email, billing, web UI |
+| **Works** | Web UI, signup, login, sessions, connecting a Bluesky account, composing and scheduling, the publish worker |
+| **Built, not wired** | Metrics ingestion, approvals, recycling queues, media renditions, the rights ledger |
+| **Not started** | Networks other than Bluesky, media storage, email, billing |
 
 Nothing publishes to a social network yet. Most networks also require an
 approved developer application before they can, and those take weeks — see
@@ -21,7 +21,8 @@ approved developer application before they can, and those take weeks — see
 ## Layout
 
 ```
-apps/api          HTTP service: auth, organizations, health
+apps/api          HTTP service and web client: auth, connections, composing
+apps/worker       Publish dispatcher
 packages/shared   Ids, Result, failure taxonomy, text measurement
 packages/vault    Credential encryption, password hashing, tokens
 packages/db       Connection pool, migration runner, SQL migrations

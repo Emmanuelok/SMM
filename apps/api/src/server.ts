@@ -1,6 +1,7 @@
 import cookie from '@fastify/cookie';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
+import fastifyStatic from '@fastify/static';
 import Fastify, {
   type FastifyError,
   type FastifyInstance,
@@ -8,6 +9,9 @@ import Fastify, {
   type FastifyRequest,
 } from 'fastify';
 import { z } from 'zod';
+
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { checkDatabase, createDatabase, pendingMigrations, type Sql } from '@smm/db';
 import { describedNetworks, capabilitiesFor } from '@smm/adapters';
@@ -120,6 +124,17 @@ export async function buildServer(options: BuildOptions): Promise<FastifyInstanc
   });
 
   await app.register(cookie);
+
+  // The web client. Served by the API rather than from a separate host so the
+  // session cookie is same-origin — a cross-origin front end would need CORS
+  // and SameSite=None, which trades a real CSRF protection for a deployment
+  // convenience.
+  await app.register(fastifyStatic, {
+    root: join(dirname(fileURLToPath(import.meta.url)), '..', 'public'),
+    // Assets carry no secrets and change only on deploy.
+    cacheControl: true,
+    maxAge: '5m',
+  });
 
   await app.register(rateLimit, {
     global: false,
