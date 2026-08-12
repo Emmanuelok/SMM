@@ -1,54 +1,94 @@
-# SMM — Global AI Social Media Management Platform
+# SMM
 
-An AI-native platform for creating, scheduling, publishing, and managing social media
-presence across every network that matters — worldwide.
+A social media management platform: schedule, publish, engage and measure across
+many networks.
 
-The goal is full functional parity with [Vista Social](https://vistasocial.com), then a
-decisive step beyond it: genuinely global network coverage (including the regional
-platforms Western tools ignore), an agentic AI layer that owns outcomes rather than
-tasks, and measurement that closes the loop from post to revenue.
+## State
 
-## Status
+Early. The foundations are built and tested; the publishing pipeline is not
+connected to any network yet.
 
-**Pre-implementation.** The repository currently holds foundations and an in-progress
-research corpus. No product code has been written yet — architecture decisions are
-deliberately being made *after* the research lands, not before.
-
-| Phase | State |
+| | |
 |---|---|
-| Market + technical research | In progress |
-| Scope & architecture sign-off | Pending |
-| Platform foundations | Not started |
-| Product modules | Not started |
+| **Works** | Signup, login, sessions, organizations, brand containers, migrations, capability validation |
+| **Built, not wired** | Adapter contract, publish lifecycle, scheduling engine, credential vault |
+| **Not started** | Worker service, network adapters, media storage, email, billing, web UI |
 
-## Repository layout
+Nothing publishes to a social network yet. Most networks also require an
+approved developer application before they can, and those take weeks — see
+`research/06-platform-apis-tier1.md`.
+
+## Layout
 
 ```
-research/    Market, competitive, platform-API, compliance and GTM research.
-             Written by a multi-agent research pass; the master synthesis is
-             00-MASTER-STRATEGY.md.
+apps/api          HTTP service: auth, organizations, health
+packages/shared   Ids, Result, failure taxonomy, text measurement
+packages/vault    Credential encryption, password hashing, tokens
+packages/db       Connection pool, migration runner, SQL migrations
+packages/adapters Network capabilities, validation, the adapter contract
+packages/scheduler Timezone resolution, publish budgets, retry policy
+research/         Market and platform research the design is drawn from
 ```
 
-Further directories are added once the architecture is agreed.
+## Running locally
 
-## Why the research comes first
+Needs Node 22 and Postgres 16.
 
-Two constraints dominate this product and both are external:
+```sh
+npm install
+cp .env.example .env      # then set DATABASE_URL and CREDENTIAL_KEYS
+npm run build
+node packages/db/dist/cli.js up
+node apps/api/dist/main.js
+```
 
-1. **Platform API access is the real bottleneck.** Meta Tech Provider status, X API
-   pricing tiers, the TikTok Content Posting API, and the LinkedIn Marketing Developer
-   Platform all gate production access behind review processes measured in weeks to
-   months — and several prohibit capabilities users assume exist. Some networks cannot
-   be auto-published to at all, which forces a reminder-based fallback path that has to
-   be designed in, not bolted on.
+Generate a credential key with:
 
-2. **Platform terms constrain the data model.** Several networks cap how long their data
-   may be cached, which directly shapes what the analytics architecture can store and
-   for how long.
+```sh
+node -e "console.log('k1:' + require('crypto').randomBytes(32).toString('base64'))"
+```
 
-Designing around these from day one is cheaper than discovering them after building.
+```sh
+npm test          # builds, then runs every test
+npm run typecheck
+```
 
-## Contributing
+Deployment is documented in [DEPLOYMENT.md](DEPLOYMENT.md).
 
-Development happens on feature branches. See `research/` for the strategy and
-architecture rationale behind any given module.
+## Design decisions worth knowing before reading the code
+
+**Capabilities are data, not code.** Every network expresses the same handful of
+constraints — text length, media counts, codecs, daily caps — so the validator is
+written once and each network supplies its numbers. The same descriptors drive
+the composer and the pre-publish check, so what the editor allows and what the
+API accepts cannot drift apart.
+
+**Delivery mode depends on content, not format.** A plain Instagram Story
+publishes through the API; the same Story with a link sticker cannot, because
+Meta exposes no sticker API. Since Stories are Instagram's most-used format and
+stickers are their entire engagement mechanic, reminder-based publishing is a
+primary path rather than an edge case.
+
+**Text measurement is its own module.** A naive length check is wrong three
+ways: emoji are several UTF-16 units but one character to a user, X weights CJK
+and emoji as two, and X rewrites every URL to a fixed width so link length is
+irrelevant.
+
+**Scheduling stores intent, not just the resulting instant.** Timezone rules
+change several times a year; keeping only the computed moment makes the
+resulting drift undetectable and uncorrectable.
+
+**Metrics carry provenance from the first row.** Platform retention windows are
+short — Pinterest 90 days, X 30, TikTok around 60 — so uncaptured data is
+unrecoverable, and provenance added later leaves the back catalogue
+unattributable.
+
+**Migrations are the schema contract.** No ORM: model definitions would be a
+second description of the same thing, free to drift from the first.
+
+## Research
+
+`research/` holds 19 dossiers and three synthesis documents. Start with
+`00-MASTER-STRATEGY.md`. `00-critique.md` is a deliberate audit of what the
+research missed or asserted without evidence, and `00-UPGRADE-SPEC.md` audits
+this codebase against the findings.

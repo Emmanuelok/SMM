@@ -20,6 +20,11 @@
     "verbatimModuleSyntax": true,
     "isolatedModules": true,
 
+    // A type error must fail the build rather than emit anyway. Without this,
+    // a Docker build can produce a running image from code that does not
+    // typecheck, and the error is discovered in production.
+    "noEmitOnError": true,
+
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   }

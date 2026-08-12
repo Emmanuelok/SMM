@@ -1,0 +1,13 @@
+node_modules
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+.git
+.github
+research
+*.md
+!packages/db/README.md
+.env
+.env.*
+coverage
+/data
