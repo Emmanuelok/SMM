@@ -13,7 +13,7 @@ import { z } from 'zod';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { checkDatabase, createDatabase, pendingMigrations, type Sql } from '@smm/db';
+import { checkDatabase, createDatabase, pendingMigrations, shouldUseSsl, type Sql } from '@smm/db';
 import { describedNetworks, capabilitiesFor } from '@smm/adapters';
 import { EnvKeyProvider, Vault } from '@smm/vault';
 
@@ -62,6 +62,13 @@ export interface BuildOptions {
   readonly config: Config;
   readonly sql?: Sql | undefined;
   readonly migrationsDir?: string | undefined;
+  /**
+   * Set when migrations failed at startup.
+   *
+   * The service still runs — a crash loop explains nothing — but it must not
+   * claim to be ready, because the schema it expects is not there.
+   */
+  readonly migrationError?: string | undefined;
 }
 
 export async function buildServer(options: BuildOptions): Promise<FastifyInstance> {
@@ -71,7 +78,9 @@ export async function buildServer(options: BuildOptions): Promise<FastifyInstanc
     options.sql ??
     createDatabase({
       url: config.DATABASE_URL,
-      ssl: config.DATABASE_SSL,
+      // Resolved from the host rather than read straight from the variable, so
+      // a private-network database is not asked for TLS it cannot terminate.
+      ssl: shouldUseSsl(config.DATABASE_URL),
       poolSize: config.DATABASE_POOL_SIZE,
     });
 
@@ -163,6 +172,12 @@ export async function buildServer(options: BuildOptions): Promise<FastifyInstanc
    * an older schema fails in ways that look like application bugs.
    */
   app.get('/ready', async (_request, reply) => {
+    if (options.migrationError !== undefined) {
+      return reply
+        .code(503)
+        .send({ status: 'migration_failed', detail: options.migrationError });
+    }
+
     const databaseOk = await checkDatabase(sql);
     if (!databaseOk) {
       return reply.code(503).send({ status: 'unavailable', database: false });

@@ -5,7 +5,6 @@
     "dockerfilePath": "Dockerfile"
   },
   "deploy": {
-    "preDeployCommand": "node packages/db/dist/cli.js up",
     "startCommand": "node apps/api/dist/main.js",
     "healthcheckPath": "/health",
     "healthcheckTimeout": 60,

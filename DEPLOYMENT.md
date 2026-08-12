@@ -46,40 +46,34 @@ so a misconfiguration fails the deploy rather than the first signup.
 railway up
 ```
 
-Migrations run automatically. `railway.json` sets them as a **pre-deploy
-command**, which Railway runs in a separate one-off container before switching
-traffic to the new version:
+That is the whole step. **The deploy succeeds even if nothing is configured
+yet**, which is deliberate: the service comes up and tells you what is missing
+instead of dying and leaving you to read build logs.
 
-```
-node packages/db/dist/cli.js up
-```
+Migrations run at startup, not as a separate pre-deploy command. Running them
+in the service is safe because the migrator takes a Postgres advisory lock on a
+reserved connection, so several instances starting at once during a rolling
+deploy serialise rather than race — verified with two concurrent runners against
+an empty database producing one set of migrations, not two.
 
-That is a release step, not a boot step. Migrating inside the service on startup
-races every instance against every other, and a failed migration would take down
-the service attempting it rather than failing the deploy and leaving the
-previous version serving traffic. A pre-deploy command fails the deploy instead,
-which is the outcome you want.
+A separate pre-deploy command was tried first and was worse in three ways: it is
+a second place to fail, Railway applies the root `railway.json` to every service
+so the worker ran it too despite having no business migrating, and when it fails
+the deploy dies before anything can explain why.
 
-Running it twice is safe. Two instances running it simultaneously is also safe —
-an advisory lock serialises them, which matters because Railway starts a new
-instance before stopping the old one, making concurrent migration the normal
-case rather than a rare race.
+If migrations fail, the service still starts and reports it on `/ready`. A
+crash-looping container explains nothing.
 
-### Why the health check points at `/health` and not `/ready`
+### The three states a deployment can be in
 
-These answer different questions, and pointing Railway's deploy gate at the
-wrong one makes the first deploy impossible.
+| State | `/health` | `/ready` | What you see |
+|---|---|---|---|
+| Nothing configured | 200 | 503 | A page naming every missing variable |
+| Configured, database unreachable | 200 | 503 | `/ready` returns the actual connection error |
+| Working | 200 | 200 | The app |
 
-`/ready` returns 503 while migrations are pending. That is correct behaviour for
-a monitoring check — code running against an older schema fails in ways that
-look like application bugs — but as a **deploy gate** it cannot be satisfied on a
-first deploy: migrations have never run against a database the service has never
-reached, so the gate never opens and the deploy fails with
-`Healthcheck failure`.
-
-`/health` asks only whether the process is alive, and deliberately does not touch
-the database. That is the right question for a deploy gate. `/ready` is still
-there and is the right thing to point a monitor or an uptime check at.
+`/health` answers 200 in all three, so the deploy gate always opens and the
+problem is always visible in a browser rather than in a build log.
 
 ## 5. Verify
 

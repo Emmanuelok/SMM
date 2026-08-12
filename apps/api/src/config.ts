@@ -3,11 +3,17 @@ import { z } from 'zod';
 /**
  * Configuration, validated once at startup.
  *
- * Every value the service needs is checked before it accepts a request. A
- * process that boots with a missing secret and fails on the first signup has
- * turned a deploy-time error into a customer-facing one, and on a platform that
- * routes traffic to whatever is healthy, "healthy" has to mean "actually able
- * to work".
+ * Validation is strict, but a failure does NOT kill the process. That
+ * distinction was learned the hard way: a service that exits on a missing
+ * variable produces, on a platform, a container that dies and a deploy that
+ * reports "failed" with no visible reason. The operator is left reading build
+ * logs to discover a fact the application knew perfectly well.
+ *
+ * So the process starts either way. With valid configuration it serves the
+ * product; without, it serves a page naming exactly what is missing. A deploy
+ * that comes up and tells you what is wrong beats one that dies silently, and
+ * the degraded mode refuses every real route, so nothing unsafe is exposed by
+ * starting.
  */
 
 const schema = z.object({
@@ -17,14 +23,13 @@ const schema = z.object({
   // unreachable while looking perfectly healthy from inside.
   HOST: z.string().default('0.0.0.0'),
 
-  DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
-  DATABASE_SSL: z
-    .enum(['true', 'false'])
-    .optional()
-    .transform((value) => value !== 'false'),
+  DATABASE_URL: z.string().min(1, 'required — add a Postgres database and reference ${{Postgres.DATABASE_URL}}'),
+  DATABASE_SSL: z.enum(['true', 'false']).optional(),
   DATABASE_POOL_SIZE: z.coerce.number().int().positive().max(50).default(10),
 
-  CREDENTIAL_KEYS: z.string().min(1, 'CREDENTIAL_KEYS is required'),
+  CREDENTIAL_KEYS: z
+    .string()
+    .min(1, 'required — generate with: node -e "console.log(\'k1:\' + require(\'crypto\').randomBytes(32).toString(\'base64\'))"'),
   CREDENTIAL_CURRENT_KEY: z.string().optional(),
 
   /**
@@ -54,18 +59,54 @@ const schema = z.object({
 
 export type Config = Readonly<z.infer<typeof schema>>;
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+export interface ConfigProblem {
+  readonly variable: string;
+  readonly message: string;
+}
+
+export type ConfigResult =
+  | { readonly ok: true; readonly config: Config }
+  | { readonly ok: false; readonly problems: readonly ConfigProblem[] };
+
+export function loadConfig(env: NodeJS.ProcessEnv = process.env): ConfigResult {
   const parsed = schema.safeParse(env);
-  if (!parsed.success) {
-    const problems = parsed.error.issues
-      .map((issue) => `  ${issue.path.join('.')}: ${issue.message}`)
-      .join('\n');
-    throw new Error(`Invalid configuration:\n${problems}`);
-  }
-  return Object.freeze(parsed.data);
+  if (parsed.success) return { ok: true, config: Object.freeze(parsed.data) };
+
+  return {
+    ok: false,
+    problems: parsed.error.issues.map((issue) => ({
+      variable: issue.path.join('.') || '(unknown)',
+      message: issue.message,
+    })),
+  };
+}
+
+/**
+ * The port to listen on even when configuration is invalid.
+ *
+ * Read separately and permissively, because binding the right port is what
+ * makes the failure visible at all. A degraded process on the wrong port is
+ * indistinguishable from one that never started.
+ */
+export function portFrom(env: NodeJS.ProcessEnv = process.env): number {
+  const parsed = Number(env['PORT']);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 3000;
 }
 
 /** Whether cookies may be sent over plain HTTP. Only ever true locally. */
 export function allowInsecureCookies(config: Config): boolean {
   return config.NODE_ENV !== 'production' && config.PUBLIC_URL.startsWith('http://');
+}
+
+/**
+ * Whether TLS to the database should be required.
+ *
+ * Duplicated from `@smm/db` rather than imported so the degraded-mode server,
+ * which never opens a database connection, does not depend on the database
+ * package to explain itself.
+ */
+export function describeSsl(config: Config): string {
+  if (config.DATABASE_SSL === 'false') return 'disabled explicitly';
+  if (config.DATABASE_SSL === 'true') return 'required explicitly';
+  return 'automatic (off for private-network hosts)';
 }

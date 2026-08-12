@@ -24,7 +24,21 @@ function log(level: 'info' | 'error', message: string, extra: Record<string, unk
 }
 
 async function main(): Promise<void> {
-  const url = databaseUrlFromEnv();
+  // Waits rather than exits. A worker that dies on a missing variable gets
+  // restarted by the platform every few seconds, and the resulting log is a
+  // wall of identical crashes rather than one clear statement of the problem.
+  let url: string | undefined;
+  while (url === undefined) {
+    try {
+      url = databaseUrlFromEnv();
+    } catch {
+      log('error', 'DATABASE_URL is not set; waiting for it to be configured', {
+        hint: 'Set DATABASE_URL on this service, referencing ${{Postgres.DATABASE_URL}}.',
+      });
+      await new Promise((resolve) => setTimeout(resolve, 30_000));
+    }
+  }
+
   const sql = createDatabase({
     url,
     ssl: shouldUseSsl(url),
