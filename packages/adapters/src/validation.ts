@@ -1,16 +1,51 @@
-import { extractHashtags, measureText, truncateToLimit } from '@smm/shared';
+import {
+  NEAR_DUPLICATE_THRESHOLD,
+  extractHashtags,
+  measureText,
+  similarity,
+  truncateToLimit,
+} from '@smm/shared';
+
+import type { PostTargetId, SocialProfileId } from '@smm/shared';
 
 import type { FormatCapability, ImageSpec, PlatformCapabilities, VideoSpec } from './capabilities.js';
 import { formatCapability } from './capabilities.js';
+import type { DestinationId, HealthReport } from './connection.js';
+import { isPublishable } from './connection.js';
 import type { MediaRef, ResolvedTarget } from './content.js';
+import type {
+  DestinationRule,
+  DestinationRuleViolation,
+  DestinationSelections,
+  DestinationTarget,
+} from './destinations.js';
+import { validateAgainstRules } from './destinations.js';
 
 /**
- * Pre-flight validation against a network's declared capabilities.
+ * Pre-flight validation, in two layers.
  *
- * This runs in the composer as the user types and again immediately before
- * publishing. Catching a violation here turns a silent 2am failure into an
- * inline warning while the user is still looking at the post, which is the
- * single highest-leverage reliability feature a scheduling tool has.
+ * `validateTarget` is the static layer: one resolved target against one
+ * network's declared capabilities, pure, synchronous, no I/O. It runs in the
+ * composer on a keystroke, which is why it must stay that way.
+ *
+ * `validateWithContext` is the layer that knows about the world — this
+ * connection's health, this destination's live rules, what this account has
+ * published lately, and how much publish budget is left. Everything it checks
+ * is something the static layer structurally cannot know, and something that
+ * otherwise surfaces as a failed publish at 02:00 on a date the customer chose,
+ * with nobody watching.
+ *
+ * Catching a violation here turns a silent 2am failure into an inline warning
+ * while the user is still looking at the post, which is the single
+ * highest-leverage reliability feature a scheduling tool has.
+ *
+ * ── On the import of `destinations.js` ───────────────────────────────────────
+ *
+ * `destinations.ts` imports `IssueCode`, `IssueSeverity` and `ValidationIssue`
+ * from this module, and this module imports `validateAgainstRules` from it. The
+ * direction that closes the loop is type-only and erases under
+ * `verbatimModuleSyntax`, so there is no module-load cycle at runtime — the
+ * same arrangement `content.ts` and `variants.ts` already document.
  */
 
 export type IssueSeverity =
@@ -39,9 +74,42 @@ export type IssueCode =
   | 'image_aspect_ratio_invalid'
   | 'video_too_long'
   | 'video_too_short'
+  | 'video_dimensions_invalid'
   | 'video_aspect_ratio_invalid'
   | 'missing_alt_text'
-  | 'feature_unsupported';
+  | 'feature_unsupported'
+  /* ── Context-dependent codes. Only `validateWithContext` produces these. ── */
+  /**
+   * Close enough to something this account published or queued recently that a
+   * platform is likely to refuse it. Always a warning — see `findDuplicate`
+   * for why this must never block on its own.
+   */
+  | 'near_duplicate_content'
+  /**
+   * The connection cannot publish in its current state: revoked, expired,
+   * missing a scope, or the account is restricted.
+   */
+  | 'connection_not_ready'
+  /**
+   * No publishing headroom left — the 24-hour cap, the minimum interval between
+   * posts, or a shared developer app's daily unit budget.
+   *
+   * Distinct from the upgrade spec's `quota_breach_in_calendar`, which is a
+   * simulation of a whole calendar against every cap and belongs to the
+   * scheduler. This one is about the single post in front of the user, now.
+   */
+  | 'quota_exhausted'
+  /** A per-write charge would take the tenant past their own spend cap. */
+  | 'cost_exceeds_cap';
+
+/*
+ * The upgrade spec also names `destination_rule_violation`. It is deliberately
+ * not here: `destinations.ts` maps every breached rule onto the existing codes
+ * (see `codeFor` there) so that a flair requirement and a caption limit light
+ * up the same part of the composer, and carries the specifics in the
+ * violation's `rule` and `remediation` fields instead. A second code for the
+ * same class of issue would split the UI's handling of it in two.
+ */
 
 /**
  * A fix the system can apply on the user's behalf.
@@ -216,6 +284,21 @@ function validateVideo(
     }
   }
 
+  // Minimum resolution is declared by every VideoSpec and populated by the
+  // registry — YouTube at 256x144, X at 32x32 — but was going unchecked, so an
+  // under-sized upload sailed through validation and was rejected at publish.
+  const { width, height } = media;
+  if (width !== undefined && height !== undefined && (width < spec.minWidth || height < spec.minHeight)) {
+    issues.push(
+      issue(
+        'video_dimensions_invalid',
+        'error',
+        `Video is ${width}x${height}; ${network} requires at least ${spec.minWidth}x${spec.minHeight}.`,
+        { field: 'media', mediaIndex: index },
+      ),
+    );
+  }
+
   const ratio = aspectRatio(media);
   if (ratio !== undefined && (ratio < spec.minAspectRatio || ratio > spec.maxAspectRatio)) {
     issues.push(
@@ -386,6 +469,20 @@ function validateMedia(
       } else {
         issues.push(...validateVideo(m, i, mediaCap.video, network));
       }
+    } else {
+      // Documents and audio reached this point unchecked, so a 999 MB archive
+      // attached to an image post validated cleanly. No capability descriptor
+      // declares specs for them yet, and a kind we cannot check is a kind we
+      // cannot promise will publish — saying so is better than staying silent
+      // and failing later.
+      issues.push(
+        issue(
+          'media_type_unsupported',
+          'error',
+          `${network} does not accept ${m.kind} attachments on this post type.`,
+          { field: 'media', mediaIndex: i },
+        ),
+      );
     }
 
     // Alt text is never required by a platform, but omitting it excludes
@@ -549,5 +646,430 @@ export function validateTarget(
     issues,
     publishable: !blocked,
     delivery: blocked ? 'blocked' : effectiveDelivery,
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* The context that makes pre-flight real                                      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * One post this account already published or has queued, reduced to the parts
+ * duplicate detection needs.
+ *
+ * Bodies rather than content hashes, because the check is for *near*
+ * duplicates. A recycled evergreen post with a rotated hashtag block and a
+ * fresh UTM parameter hashes differently and reads identically, and it is the
+ * second property the platforms act on.
+ */
+export interface RecentPost {
+  readonly targetId: PostTargetId;
+  readonly body: string;
+  /** When it went out, or when it is due to. Both count against a platform's window. */
+  readonly at: Date;
+  /**
+   * Which profile it belongs to, where the caller knows.
+   *
+   * Only used to say "queued on 6 profiles" rather than "6 posts", which is the
+   * difference between a user recognising their own cross-post and wondering
+   * what the tool is talking about.
+   */
+  readonly profileId?: SocialProfileId | undefined;
+}
+
+/**
+ * What the similarity index found, in a form the composer can show.
+ *
+ * The threshold travels with the score deliberately. A bare "94% similar" is
+ * not actionable — the user cannot tell whether that is close to the line or
+ * far past it — and the threshold is tunable per network, so hardcoding it into
+ * the message would put a number in the UI that disagrees with the one the
+ * check actually used.
+ */
+export interface DuplicateFinding {
+  /** 0 to 1, from `similarity`. */
+  readonly score: number;
+  /** The score at or above which this was reported. */
+  readonly threshold: number;
+  /** Every recent post that scored at or above the threshold. */
+  readonly conflictingTargets: readonly PostTargetId[];
+  readonly windowHours: number;
+  readonly message: string;
+}
+
+/**
+ * Remaining publish headroom at all three levels that can independently run out.
+ *
+ * Three, not one, because they fail for different reasons and are fixed by
+ * different people. The account cap is the customer's own posting volume. The
+ * app budget is shared with every other tenant on our developer app, so one
+ * customer backfilling a large channel can exhaust it for people who did
+ * nothing — which is the entire argument for bring-your-own-app. The spend cap
+ * is the tenant's own money on the networks that charge per write.
+ *
+ * Every field is optional because most networks impose none of them, and an
+ * absent field means "no known limit", never "zero left".
+ */
+export interface QuotaHeadroom {
+  /** Posts left against the network's rolling 24-hour cap for this account. */
+  readonly postsRemainingIn24h?: number | undefined;
+  /** Earliest moment the network's minimum interval permits another post. */
+  readonly nextAllowedAt?: Date | undefined;
+  /**
+   * Units left in the developer app's periodic budget — YouTube's daily units,
+   * a shared app's per-project ceiling. Pooled across tenants on a shared app.
+   */
+  readonly appUnitsRemaining?: number | undefined;
+  /** Headroom under the tenant's own spend cap, for networks that charge per post. */
+  readonly tenantSpendRemainingUsd?: number | undefined;
+}
+
+/**
+ * The destination this draft is aimed at, together with the rules fetched from
+ * it and the user's answers to them.
+ *
+ * All three travel as one object because none of them is checkable alone: a
+ * rule set can only be validated against the destination it was fetched for
+ * (`validateAgainstRules` asserts exactly that), and a mandatory-flair rule is
+ * only satisfied or breached relative to what the user chose.
+ */
+export interface DestinationContext {
+  readonly destinationId: DestinationId;
+  readonly rules: readonly DestinationRule[];
+  readonly selections?: DestinationSelections | undefined;
+}
+
+/**
+ * Everything `validateWithContext` needs that a static descriptor cannot supply.
+ *
+ * `now` is a parameter rather than a call to `Date.now()` inside, for the usual
+ * reason and one specific one: validation runs both in the composer and again
+ * from the scheduler against a post due later, and the answer to "is there
+ * headroom" and "is this within the duplicate window" is different at those two
+ * instants. A function that reads the clock itself cannot be asked about the
+ * second one, and cannot be tested at all.
+ *
+ * The upgrade spec's context additionally names link probing, rights state,
+ * rendition readiness, voice adherence, calendar simulation and a cost
+ * estimate. Those are deliberately absent until the modules that own them
+ * exist. A field declared here and never populated is worse than a missing
+ * one: the composer would read it as "checked and fine", which is a claim we
+ * would not be entitled to make.
+ */
+export interface ValidationContext {
+  readonly now: Date;
+  /**
+   * The most recent read-only probe of the connection.
+   *
+   * Required, not optional. An absent health report and a healthy one are
+   * indistinguishable at the call site once the field is optional, and the
+   * whole point of `HealthStatus.unknown` is that assuming health from a check
+   * that did not happen is how a dead connection stays green for a week.
+   */
+  readonly connectionHealth: HealthReport;
+  readonly quota: QuotaHeadroom;
+  readonly destination?: DestinationContext | undefined;
+  /**
+   * Recent bodies to compare against. Callers should supply the window the
+   * platform is believed to care about; anything outside `duplicateWindowHours`
+   * is ignored here anyway.
+   */
+  readonly recentPosts?: readonly RecentPost[] | undefined;
+  /** Overrides `NEAR_DUPLICATE_THRESHOLD`, for a network known to be stricter. */
+  readonly duplicateThreshold?: number | undefined;
+  readonly duplicateWindowHours?: number | undefined;
+}
+
+/**
+ * A report that also carries the structured duplicate finding.
+ *
+ * Extends `ValidationReport` rather than replacing it, so a contextual report
+ * is assignable everywhere a static one is and nothing downstream has to know
+ * which layer produced it. The finding is surfaced separately as well as in an
+ * issue because the composer renders the score and the conflicting posts, and
+ * re-parsing them out of a sentence is not a design.
+ */
+export interface ContextualValidationReport extends ValidationReport {
+  readonly duplicate?: DuplicateFinding | undefined;
+  /** Destination rule breaches, also merged into `issues`. */
+  readonly ruleViolations: readonly DestinationRuleViolation[];
+}
+
+/**
+ * How far back to look for duplicates by default.
+ *
+ * Three days. The platforms publish nothing about their windows, and this is
+ * set from the behaviour people actually hit: the same post going out to
+ * several profiles across a couple of days, and a queue refilled from a small
+ * library. Longer would flag a quarterly evergreen repost, which is a
+ * deliberate act and a legitimate one.
+ */
+export const DEFAULT_DUPLICATE_WINDOW_HOURS = 72;
+
+/**
+ * How old a health report may be before it is worth mentioning.
+ *
+ * A day. Shorter would nag on every post for accounts probed on a nightly
+ * sweep, which is the normal cadence; longer and a token revoked on Monday is
+ * still being reported as healthy on Thursday.
+ */
+export const HEALTH_REPORT_STALE_AFTER_HOURS = 24;
+
+const MS_PER_HOUR = 3_600_000;
+
+/**
+ * Turn the connection's health into issues the person composing can act on.
+ *
+ * The error/no-error split is delegated to `isPublishable` rather than decided
+ * again here. That function is the one place that states which statuses may
+ * publish, and a second opinion in the validator would eventually disagree with
+ * the publisher — which shows up as the composer blocking posts the pipeline
+ * would have sent, or clearing posts it then refuses.
+ *
+ * `unknown` therefore blocks, and that is intentional despite looking harsh: an
+ * unverified connection is not a working one, and the alternative is a campaign
+ * scheduled against a connection nobody has successfully checked.
+ */
+function checkConnection(health: HealthReport, now: Date, network: string): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+
+  if (!isPublishable(health)) {
+    const missing = health.missingScopes;
+    const detail =
+      missing !== undefined && missing.length > 0
+        ? ` Missing permission${missing.length === 1 ? '' : 's'}: ${missing.join(', ')}.`
+        : '';
+    issues.push(issue('connection_not_ready', 'error', `${health.message}${detail}`));
+  } else if (health.status === 'expiring') {
+    // A warning, never a block: the token still works, and refusing to schedule
+    // on a warning cancels campaigns that would have published fine.
+    const when = health.predictedExpiryAt ?? health.expiresAt;
+    const by =
+      when === undefined ? '' : ` It stops working around ${when.toISOString().slice(0, 10)}.`;
+    issues.push(
+      issue(
+        'connection_not_ready',
+        'warning',
+        `This ${network} connection needs reconnecting soon.${by}`,
+      ),
+    );
+  }
+
+  // Age of the evidence, separately from what the evidence said. A stale green
+  // is worse than a red, because nobody looks at it twice.
+  const ageMs = now.getTime() - health.checkedAt.getTime();
+  if (ageMs > HEALTH_REPORT_STALE_AFTER_HOURS * MS_PER_HOUR) {
+    issues.push(
+      issue(
+        'connection_not_ready',
+        'warning',
+        `This ${network} connection was last checked ${Math.floor(ageMs / MS_PER_HOUR)} hours ago, so its status may be out of date.`,
+      ),
+    );
+  }
+
+  return issues;
+}
+
+/**
+ * The marginal cost of publishing this particular post, where the network
+ * charges per write.
+ *
+ * A post carrying a link is priced separately on the network that does this at
+ * all, so the link surcharge wins where both are declared.
+ */
+function estimatedCostUsd(target: ResolvedTarget, caps: PlatformCapabilities): number | undefined {
+  const { costPerPostUsd, costPerPostWithLinkUsd } = caps.publishing;
+  if (target.link !== undefined && costPerPostWithLinkUsd !== undefined) {
+    return costPerPostWithLinkUsd;
+  }
+  return costPerPostUsd;
+}
+
+/**
+ * Check the three budgets that can independently run out.
+ *
+ * All of these are enforced on our side before the platform sees the request,
+ * because discovering a limit by being rejected costs the user a posting slot
+ * and costs us standing with the platform.
+ */
+function checkQuota(
+  target: ResolvedTarget,
+  caps: PlatformCapabilities,
+  quota: QuotaHeadroom,
+  now: Date,
+  network: string,
+): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+
+  if (quota.postsRemainingIn24h !== undefined && quota.postsRemainingIn24h <= 0) {
+    issues.push(
+      issue(
+        'quota_exhausted',
+        'error',
+        `This account has used its ${network} allowance for the next 24 hours. Move this post to a later slot.`,
+      ),
+    );
+  }
+
+  if (quota.nextAllowedAt !== undefined && quota.nextAllowedAt.getTime() > now.getTime()) {
+    const minutes = Math.ceil((quota.nextAllowedAt.getTime() - now.getTime()) / 60_000);
+    issues.push(
+      issue(
+        'quota_exhausted',
+        'error',
+        `${network} requires a gap between posts to one account. The next one can go out in ${minutes} minute${minutes === 1 ? '' : 's'}.`,
+      ),
+    );
+  }
+
+  if (quota.appUnitsRemaining !== undefined && quota.appUnitsRemaining <= 0) {
+    // Worded around what the customer can do about it, because on a shared app
+    // the cause is usually somebody else entirely and "try again tomorrow" is
+    // the only honest instruction that does not blame them.
+    issues.push(
+      issue(
+        'quota_exhausted',
+        'error',
+        `Our ${network} API budget for today is used up. This post can go out after the daily reset, or sooner if this organisation connects its own ${network} app.`,
+      ),
+    );
+  }
+
+  const cost = estimatedCostUsd(target, caps);
+  const remaining = quota.tenantSpendRemainingUsd;
+  if (cost !== undefined && remaining !== undefined && cost > remaining) {
+    // Only a verified price may block. The descriptor's own rule is that
+    // billing must refuse anything softer than `verified`, and stopping
+    // somebody's campaign on a figure we inferred is the same mistake as
+    // charging them for one.
+    const verified = caps.publishing.costConfidence === 'verified';
+    issues.push(
+      issue(
+        'cost_exceeds_cap',
+        verified ? 'error' : 'warning',
+        `Publishing to ${network} costs about $${cost.toFixed(2)} and this organisation has $${remaining.toFixed(2)} left under its spend cap${verified ? '' : ' (that price is our best estimate, not a confirmed figure)'}.`,
+      ),
+    );
+  }
+
+  return issues;
+}
+
+/**
+ * Compare this body against what the account published or queued recently.
+ *
+ * Always a warning, never an error, and that is a rule rather than a default.
+ * We do not know the platforms' thresholds, they change them, and the score is
+ * a prediction tuned to be useful rather than exact. A tool that refuses to
+ * publish something the platform would have accepted is worse than one that
+ * lets a duplicate through — the first costs a posting slot and the user's
+ * trust in the check, the second costs a dismissible notice.
+ *
+ * One aggregated finding rather than one per conflict: a queue refilled from a
+ * small library trips against a dozen posts at once, and a dozen identical
+ * warnings is noise the user learns to scroll past.
+ */
+function findDuplicate(
+  target: ResolvedTarget,
+  context: ValidationContext,
+): DuplicateFinding | undefined {
+  const recent = context.recentPosts;
+  if (recent === undefined || recent.length === 0) return undefined;
+  if (target.body.trim() === '') return undefined;
+
+  const threshold = context.duplicateThreshold ?? NEAR_DUPLICATE_THRESHOLD;
+  const windowHours = context.duplicateWindowHours ?? DEFAULT_DUPLICATE_WINDOW_HOURS;
+  const earliest = context.now.getTime() - windowHours * MS_PER_HOUR;
+
+  const conflicts: PostTargetId[] = [];
+  const profiles = new Set<SocialProfileId>();
+  let best = 0;
+
+  for (const post of recent) {
+    // Future-dated entries are queued posts, which count: publishing a
+    // near-duplicate an hour before its twin goes out is the same collision.
+    if (post.at.getTime() < earliest) continue;
+    const score = similarity(target.body, post.body);
+    if (score < threshold) continue;
+    conflicts.push(post.targetId);
+    if (post.profileId !== undefined) profiles.add(post.profileId);
+    if (score > best) best = score;
+  }
+
+  if (conflicts.length === 0) return undefined;
+
+  const where = profiles.size > 1 ? ` across ${profiles.size} profiles` : '';
+  const message = `${Math.round(best * 100)}% similar to ${conflicts.length} post${conflicts.length === 1 ? '' : 's'}${where} in the last ${windowHours} hours.`;
+
+  return { score: best, threshold, conflictingTargets: conflicts, windowHours, message };
+}
+
+/**
+ * Layer the context-dependent checks on top of the static ones.
+ *
+ * `validateTarget` is called first and its result is never rewritten — issues
+ * are added, not edited or removed. That keeps the two layers independently
+ * testable and means the composer's on-keystroke report and this one cannot
+ * contradict each other about the same fact.
+ *
+ * Everything checked here has the same shape of justification: it is knowable
+ * before publishing, unknowable from a capability descriptor, and expensive to
+ * discover at 02:00. A connection that lost a scope yesterday, a subreddit that
+ * added a mandatory flair this morning, a body 94% identical to one queued on
+ * five other profiles, an account with no posting allowance left — each of
+ * those is a post that fails after the slot is gone, and each is a sentence
+ * next to the editor if we ask the question here instead.
+ */
+export function validateWithContext(
+  target: ResolvedTarget,
+  caps: PlatformCapabilities,
+  context: ValidationContext,
+  networkName = caps.network,
+): ContextualValidationReport {
+  const base = validateTarget(target, caps, networkName);
+  const issues: ValidationIssue[] = [...base.issues];
+
+  issues.push(...checkConnection(context.connectionHealth, context.now, networkName));
+  issues.push(...checkQuota(target, caps, context.quota, context.now, networkName));
+
+  let ruleViolations: readonly DestinationRuleViolation[] = [];
+  const destination = context.destination;
+  if (destination !== undefined) {
+    // Assembled here rather than asked of the caller, so that the target passed
+    // in stays a plain `ResolvedTarget` and nothing upstream has to know that
+    // rule checking wants a different shape of the same draft.
+    const destinationTarget: DestinationTarget = {
+      ...target,
+      destinationId: destination.destinationId,
+      selections: destination.selections,
+    };
+    ruleViolations = validateAgainstRules(destinationTarget, destination.rules);
+    issues.push(...ruleViolations);
+  }
+
+  const duplicate = findDuplicate(target, context);
+  if (duplicate !== undefined) {
+    const stricter = caps.publishing.rejectsDuplicateContent
+      ? ` ${networkName} refuses posts it considers repeats, so this one will probably be rejected.`
+      : '';
+    issues.push(
+      issue('near_duplicate_content', 'warning', `${duplicate.message}${stricter}`, {
+        field: 'body',
+      }),
+    );
+  }
+
+  const blocked = issues.some((i) => i.severity === 'error');
+
+  return {
+    issues,
+    publishable: !blocked,
+    // A newly blocked post is blocked; an unblocked one keeps whatever delivery
+    // the static layer worked out, because nothing here changes how a post
+    // reaches a network, only whether it may go at all.
+    delivery: blocked ? 'blocked' : base.delivery,
+    duplicate,
+    ruleViolations,
   };
 }

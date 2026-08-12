@@ -1,4 +1,4 @@
-import { backoffMs, dispositionOf, type PublishFailure } from '@smm/shared';
+import { backoffMs, dispositionOf, type PublishFailure, type SocialProfileId } from '@smm/shared';
 
 /**
  * Retry policy for failed publish attempts.
@@ -29,8 +29,21 @@ export type NextAttempt =
   | { readonly action: 'retry'; readonly at: Date; readonly attempt: number }
   /** Retrying will not help. The user is told what happened. */
   | { readonly action: 'give_up'; readonly reason: string }
-  /** Blocked until the account is re-authorised. */
-  | { readonly action: 'await_reconnect' };
+  /** Blocked until the account is re-authorised, and we cannot say which one. */
+  | { readonly action: 'await_reconnect' }
+  /**
+   * Blocked until the account is re-authorised, and we know exactly which
+   * account, so the caller can mint a repair link for it.
+   *
+   * Added when the failure taxonomy grew `RetryDisposition.repair_link`. It is a
+   * separate arm rather than an optional field on `await_reconnect` because the
+   * two demand different work from the caller: one can only raise an alert,
+   * while this one can send a specific person a link that fixes the connection.
+   * Folding them together would make the distinction the taxonomy just drew
+   * invisible again at the only layer that acts on it, and a repair link that is
+   * never sent is the red dot in a dashboard the client cannot see.
+   */
+  | { readonly action: 'send_repair_link'; readonly profileId: SocialProfileId };
 
 /**
  * Decide what happens after a failed attempt.
@@ -46,9 +59,16 @@ export function planNextAttempt(
   policy: AttemptPolicy = DEFAULT_ATTEMPT_POLICY,
   random: () => number = Math.random,
 ): NextAttempt {
-  const disposition = dispositionOf(failure);
+  const disposition = dispositionOf(failure, now);
 
   if (disposition.action === 'await_reconnect') return { action: 'await_reconnect' };
+
+  // Checked alongside the other terminal dispositions rather than after the
+  // attempt counter: a missing consent does not become grantable by waiting, so
+  // spending attempts on it only delays the moment somebody is asked to fix it.
+  if (disposition.action === 'repair_link') {
+    return { action: 'send_repair_link', profileId: disposition.profileId };
+  }
 
   if (disposition.action === 'fail') {
     return { action: 'give_up', reason: failure.message };
