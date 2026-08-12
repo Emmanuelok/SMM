@@ -5,8 +5,8 @@ many networks.
 
 ## State
 
-Early. The foundations are built and tested; the publishing pipeline is not
-connected to any network yet.
+Early, but end to end. You can sign up, connect a Bluesky account, schedule a
+post, and the worker will pick it up and publish it.
 
 | | |
 |---|---|
@@ -14,9 +14,14 @@ connected to any network yet.
 | **Built, not wired** | Metrics ingestion, approvals, recycling queues, media renditions, the rights ledger |
 | **Not started** | Networks other than Bluesky, media storage, email, billing |
 
-Nothing publishes to a social network yet. Most networks also require an
-approved developer application before they can, and those take weeks — see
-`research/06-platform-apis-tier1.md`.
+Only Bluesky. Every other network parks its posts with a clear reason rather
+than failing obscurely, because they require an approved developer application
+first and those take weeks — see `research/06-platform-apis-tier1.md`. Bluesky
+needs none, which is why it came first.
+
+The live Bluesky calls are the one thing never executed in development: the
+sandbox this was built in blocks the host. Everything either side of them is
+covered, so the first real connection is also the first real test.
 
 ## Layout
 
