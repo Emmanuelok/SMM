@@ -40,28 +40,46 @@ railway variables --set "SERVICE_NAME=smm-api"
 all of them at startup and refuses to boot on anything missing or malformed,
 so a misconfiguration fails the deploy rather than the first signup.
 
-## 4. Migrate, then deploy
-
-Migrations are a **release step, not something the service does at boot**.
-Migrating on startup races every instance against every other, and a failed
-migration would take down the service attempting it instead of failing the
-deploy and leaving the previous version serving traffic.
+## 4. Deploy
 
 ```sh
-railway run node packages/db/dist/cli.js up
 railway up
 ```
 
-Adding it as a Railway pre-deploy command runs it automatically on each deploy:
+Migrations run automatically. `railway.json` sets them as a **pre-deploy
+command**, which Railway runs in a separate one-off container before switching
+traffic to the new version:
 
 ```
 node packages/db/dist/cli.js up
 ```
 
+That is a release step, not a boot step. Migrating inside the service on startup
+races every instance against every other, and a failed migration would take down
+the service attempting it rather than failing the deploy and leaving the
+previous version serving traffic. A pre-deploy command fails the deploy instead,
+which is the outcome you want.
+
 Running it twice is safe. Two instances running it simultaneously is also safe —
 an advisory lock serialises them, which matters because Railway starts a new
 instance before stopping the old one, making concurrent migration the normal
 case rather than a rare race.
+
+### Why the health check points at `/health` and not `/ready`
+
+These answer different questions, and pointing Railway's deploy gate at the
+wrong one makes the first deploy impossible.
+
+`/ready` returns 503 while migrations are pending. That is correct behaviour for
+a monitoring check — code running against an older schema fails in ways that
+look like application bugs — but as a **deploy gate** it cannot be satisfied on a
+first deploy: migrations have never run against a database the service has never
+reached, so the gate never opens and the deploy fails with
+`Healthcheck failure`.
+
+`/health` asks only whether the process is alive, and deliberately does not touch
+the database. That is the right question for a deploy gate. `/ready` is still
+there and is the right thing to point a monitor or an uptime check at.
 
 ## 5. Verify
 
@@ -70,15 +88,8 @@ curl https://<your-domain>/health   # {"status":"ok"}
 curl https://<your-domain>/ready    # {"status":"ready"}
 ```
 
-`/ready` is the health check path in `railway.json`. It returns 503 while
-migrations are pending, so a deploy whose migration step failed will not take
-traffic.
-
-The two probes answer different questions and must not be swapped. `/health`
-asks whether the process is alive and deliberately does not touch the database:
-a liveness check that fails during a database blip gets the container killed,
-which cannot help and removes capacity exactly when it is scarcest. `/ready`
-asks whether this instance should receive traffic.
+`/health` is the deploy gate. `/ready` additionally confirms the database is
+reachable and the schema is current, and is what a monitor should watch.
 
 Then confirm signup works:
 
@@ -88,6 +99,28 @@ curl -X POST https://<your-domain>/api/auth/signup \
   -d '{"email":"you@example.com","password":"a-sufficiently-long-passphrase",
        "name":"Your Name","organizationName":"Your Company"}'
 ```
+
+## When a deploy fails
+
+**`Healthcheck failure` after Build and Deploy both succeeded** means the
+container started but nothing answered the probe. Open **View logs** on the
+failed deployment; the cause is almost always one of three things, and each
+prints plainly:
+
+- *`Invalid configuration:` followed by a list.* A required variable is missing
+  or malformed. The service validates everything at startup and refuses to boot
+  rather than failing later on a customer's request, so this is the intended
+  behaviour — set the variable and redeploy.
+- *`DATABASE_URL is not set`.* The database is not linked to this service.
+  Reference it as `${{Postgres.DATABASE_URL}}` rather than pasting a value.
+- *`CREDENTIAL_KEYS is not set`.* Generate one as in step 2.
+
+**The pre-deploy command failed.** The deploy is stopped before traffic moves and
+the previous version keeps serving. The migration output names the file that
+failed.
+
+**Nothing in the logs at all** usually means the process exited before writing
+anything, which points at the image rather than the configuration.
 
 ## Scaling
 

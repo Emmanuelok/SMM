@@ -5,9 +5,10 @@
     "dockerfilePath": "Dockerfile"
   },
   "deploy": {
+    "preDeployCommand": "node packages/db/dist/cli.js up",
     "startCommand": "node apps/api/dist/main.js",
-    "healthcheckPath": "/ready",
-    "healthcheckTimeout": 30,
+    "healthcheckPath": "/health",
+    "healthcheckTimeout": 60,
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 5,
     "numReplicas": 1
