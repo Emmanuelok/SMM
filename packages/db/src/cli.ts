@@ -54,9 +54,49 @@ function hintFor(message: string): string {
   return '';
 }
 
+/**
+ * Report which required variables this process can see.
+ *
+ * Names and presence only — never values, since this output goes to a build log
+ * that is far more widely readable than the variables themselves.
+ *
+ * Printed before anything is attempted because a migration failing during a
+ * deploy is diagnosed from a log line and nothing else, and "which variables
+ * did the container actually have" is the first question worth answering. A
+ * variable set on the service but not on the pre-deploy step looks identical to
+ * one never set at all, until you can see the list.
+ */
+function reportEnvironment(env: NodeJS.ProcessEnv): void {
+  const present = (name: string): string =>
+    env[name] === undefined || env[name] === '' ? 'MISSING' : 'set';
+  console.log(
+    `environment: DATABASE_URL=${present('DATABASE_URL')} ` +
+      `DATABASE_SSL=${env['DATABASE_SSL'] ?? 'unset'} ` +
+      `NODE_ENV=${env['NODE_ENV'] ?? 'unset'}`,
+  );
+}
+
 async function main(): Promise<void> {
   const command = process.argv[2] ?? 'up';
-  const url = databaseUrlFromEnv();
+  reportEnvironment(process.env);
+
+  let url: string;
+  try {
+    url = databaseUrlFromEnv();
+  } catch {
+    // The single most common first-deploy failure, and previously an unhandled
+    // rejection with a stack trace rather than an instruction.
+    console.error(
+      'DATABASE_URL is not set for this process.\n\n' +
+        'On Railway: add a Postgres database to the project, then set the variable on\n' +
+        'this service as a reference rather than a pasted value:\n\n' +
+        '  railway variables --set "DATABASE_URL=${{Postgres.DATABASE_URL}}"\n\n' +
+        'A reference follows the database if it is ever recreated; a pasted value does not.',
+    );
+    process.exitCode = 1;
+    return;
+  }
+
   const sql = createDatabase({ url, ssl: shouldUseSsl(url), poolSize: 2 });
 
   try {
@@ -97,4 +137,12 @@ async function main(): Promise<void> {
   }
 }
 
-await main();
+try {
+  await main();
+} catch (error) {
+  // Nothing above should reach here, but an unhandled rejection in a pre-deploy
+  // step prints a stack trace and no instruction, which is the least useful
+  // thing a failing deploy can do.
+  console.error('Migration failed:', error instanceof Error ? error.message : String(error));
+  process.exitCode = 1;
+}
