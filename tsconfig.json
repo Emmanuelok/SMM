@@ -8,6 +8,9 @@
       "path": "./packages/vault"
     },
     {
+      "path": "./packages/db"
+    },
+    {
       "path": "./packages/adapters"
     },
     {

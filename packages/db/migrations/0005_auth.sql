@@ -117,18 +117,10 @@ CREATE INDEX login_attempts_email_idx ON login_attempts (email, attempted_at DES
 CREATE INDEX login_attempts_ip_idx ON login_attempts (ip_address, attempted_at DESC)
     WHERE ip_address IS NOT NULL;
 
--- ---------------------------------------------------------------------------
--- Migration ledger
--- ---------------------------------------------------------------------------
-
--- Which migrations have run. Created here rather than in 0001 so that the
--- runner can adopt a database that already had 0001-0004 applied by hand.
-CREATE TABLE schema_migrations (
-    filename   text PRIMARY KEY,
-    -- Detects a migration edited after it was applied, which is the failure that
-    -- makes two environments silently diverge.
-    checksum   text        NOT NULL,
-    applied_at timestamptz NOT NULL DEFAULT now()
-);
+-- The migration ledger is deliberately NOT created here. It belongs to the
+-- runner, which creates it before applying anything so it can adopt a database
+-- migrated by hand. Declaring it in a migration as well means the runner has
+-- already created it by the time this file runs, and the duplicate CREATE
+-- aborts the transaction.
 
 COMMIT;
