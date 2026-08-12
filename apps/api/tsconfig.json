@@ -4,11 +4,24 @@
     "rootDir": "./src",
     "outDir": "./dist"
   },
-  "include": ["src/**/*.ts"],
+  "include": [
+    "src/**/*.ts"
+  ],
   "references": [
-    { "path": "../../packages/shared" },
-    { "path": "../../packages/vault" },
-    { "path": "../../packages/db" },
-    { "path": "../../packages/adapters" }
+    {
+      "path": "../../packages/shared"
+    },
+    {
+      "path": "../../packages/vault"
+    },
+    {
+      "path": "../../packages/db"
+    },
+    {
+      "path": "../../packages/adapters"
+    },
+    {
+      "path": "../../packages/credentials"
+    }
   ]
 }

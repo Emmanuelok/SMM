@@ -1,4 +1,5 @@
 import { BlueskyAdapter } from '@smm/adapters';
+import { CredentialVault, blueskyCredentials } from '@smm/credentials';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 
@@ -7,7 +8,6 @@ import { unsafeId, type OrganizationId } from '@smm/shared';
 import type { Vault } from '@smm/vault';
 
 import type { AuthenticatedUser } from './auth.js';
-import { VaultCredentialStore } from './credentials.js';
 import { schedulePost } from './publishing.js';
 
 /**
@@ -46,8 +46,8 @@ export interface RouteDeps {
 
 export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
   const { sql, vault, requireUser } = deps;
-  const credentials = new VaultCredentialStore(sql, vault);
-  const bluesky = new BlueskyAdapter(credentials);
+  const credentials = new CredentialVault(sql, vault);
+  const bluesky = new BlueskyAdapter(blueskyCredentials(credentials));
 
   /**
    * What a network needs in order to be connected.

@@ -1,5 +1,7 @@
-import { AdapterRegistry } from '@smm/adapters';
+import { AdapterRegistry, BlueskyAdapter, MastodonAdapter } from '@smm/adapters';
+import { CredentialVault, blueskyCredentials, mastodonCredentials } from '@smm/credentials';
 import { createDatabase, databaseUrlFromEnv, shouldUseSsl } from '@smm/db';
+import { EnvKeyProvider, Vault } from '@smm/vault';
 
 import { runOnce } from './dispatcher.js';
 
@@ -47,11 +49,34 @@ async function main(): Promise<void> {
     poolSize: 4,
   });
 
-  // Empty until a network is connected. An adapter registered here is one this
-  // deployment can actually publish to; the registry is what the dispatcher
-  // consults, so an unregistered network parks its posts with a clear reason
-  // rather than failing obscurely.
-  const adapters = new AdapterRegistry();
+  // The registry is what the dispatcher consults, so a network missing from it
+  // parks its posts with a clear reason rather than publishing them. This was
+  // empty at first, which would have silently parked every post on an otherwise
+  // perfectly configured deployment.
+  //
+  // The worker needs the same CREDENTIAL_KEYS as the API, because it opens the
+  // credentials the API sealed. A different key here is not a degraded mode —
+  // nothing can be decrypted at all.
+  let vault: Vault;
+  while (true) {
+    try {
+      vault = new Vault(EnvKeyProvider.fromEnv());
+      break;
+    } catch (error) {
+      log('error', 'credential keys are not usable; waiting for configuration', {
+        detail: error instanceof Error ? error.message : String(error),
+        hint: 'CREDENTIAL_KEYS must be set here and must match the API exactly.',
+      });
+      await new Promise((resolve) => setTimeout(resolve, 30_000));
+    }
+  }
+
+  const credentials = new CredentialVault(sql, vault);
+  const adapters = new AdapterRegistry()
+    .register(new BlueskyAdapter(blueskyCredentials(credentials)))
+    .register(new MastodonAdapter(mastodonCredentials(credentials)));
+
+  log('info', 'adapters registered', { networks: adapters.available() });
 
   let running = true;
   const stop = (signal: string): void => {

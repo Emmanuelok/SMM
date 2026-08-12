@@ -13,6 +13,7 @@
     "@smm/db": "*",
     "@smm/scheduler": "*",
     "@smm/shared": "*",
-    "@smm/vault": "*"
+    "@smm/vault": "*",
+    "@smm/credentials": "*"
   }
 }
