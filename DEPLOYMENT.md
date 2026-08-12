@@ -172,9 +172,8 @@ worse than none:
 - **Only Bluesky has an adapter.** Every other network parks its posts with a
   clear reason rather than failing obscurely. Bluesky came first because AT
   Protocol needs no approved developer application.
-- **Connecting an account is not exposed over HTTP yet.** The Bluesky adapter
-  implements the connect flow, but no API route drives it, so credentials
-  cannot yet be added through the product.
+- **No web UI.** Every endpoint is JSON. Signup, connecting a Bluesky account
+  and scheduling a post all work over HTTP, but a person needs a client.
 - **No email.** Verification and password-reset tokens are modelled in the
   schema but nothing sends them.
 - **No object storage.** Media upload needs an S3-compatible bucket.

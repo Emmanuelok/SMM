@@ -14,6 +14,7 @@ import { describedNetworks, capabilitiesFor } from '@smm/adapters';
 import { EnvKeyProvider, Vault } from '@smm/vault';
 
 import { allowInsecureCookies, type Config } from './config.js';
+import { registerRoutes } from './routes.js';
 import {
   SESSION_COOKIE,
   clearSessionCookie,
@@ -80,7 +81,6 @@ export async function buildServer(options: BuildOptions): Promise<FastifyInstanc
         : { CREDENTIAL_CURRENT_KEY: config.CREDENTIAL_CURRENT_KEY }),
     }),
   );
-  void vault;
 
   const app = Fastify({
     logger: {
@@ -326,6 +326,10 @@ export async function buildServer(options: BuildOptions): Promise<FastifyInstanc
     });
     return reply.send({ networks });
   });
+
+  // Connecting accounts and composing posts live in their own module; they need
+  // `requireUser`, so they are registered once it exists.
+  registerRoutes(app, { sql, vault, requireUser });
 
   // --- errors ---------------------------------------------------------------
 

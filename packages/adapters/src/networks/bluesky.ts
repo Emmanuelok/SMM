@@ -308,17 +308,37 @@ export class BlueskyAdapter implements PlatformAdapter {
     const code = error.error ?? '';
     const detail = error.message ?? '';
 
-    if (error.status === 401 || code === 'ExpiredToken' || code === 'InvalidToken') {
-      return failure('auth_expired', 'The Bluesky connection needs to be reconnected.', {
+    if (
+      error.status === 401 ||
+      code === 'ExpiredToken' ||
+      code === 'InvalidToken' ||
+      code === 'AuthenticationRequired'
+    ) {
+      // Covers both a rejected app password at connect time and a credential
+      // that stopped working later. The caller knows which flow it is in and
+      // words it accordingly; the kind is the same either way because the
+      // remedy is the same — supply a working app password.
+      return failure('auth_expired', 'Bluesky did not accept this app password.', {
         platformCode: code,
         platformMessage: detail,
       });
     }
-    if (code === 'AuthenticationRequired' || code === 'AccountTakedown') {
+    if (code === 'AccountTakedown' || code === 'AccountDeactivated') {
       return failure('account_restricted', 'This Bluesky account cannot currently post.', {
         platformCode: code,
         platformMessage: detail,
       });
+    }
+    if (error.status === 403) {
+      // Also what an egress proxy returns when the host is not allowed, which
+      // is worth naming: the alternative is an opaque "unexpected error" while
+      // the real cause is a network policy nobody thought to check.
+      return failure(
+        'permission_denied',
+        'The request to Bluesky was refused. If this service runs behind an egress ' +
+          'allowlist, bsky.social needs to be on it.',
+        { platformCode: code, platformMessage: detail },
+      );
     }
     if (error.status === 429 || code === 'RateLimitExceeded') {
       return failure('rate_limited', 'Bluesky is rate limiting this account.', {
