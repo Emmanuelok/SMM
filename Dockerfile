@@ -20,6 +20,7 @@ COPY packages/db/package.json        packages/db/
 COPY packages/adapters/package.json  packages/adapters/
 COPY packages/scheduler/package.json packages/scheduler/
 COPY apps/api/package.json           apps/api/
+COPY apps/worker/package.json        apps/worker/
 
 RUN npm ci --no-audit --no-fund
 

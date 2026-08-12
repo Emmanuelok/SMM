@@ -1,7 +1,8 @@
 # Deploying to Railway
 
-What exists today deploys as **one service plus a Postgres database**. The
-worker is not built yet, so there is nothing to run in a second service.
+What exists today deploys as **two services plus a Postgres database**: the API,
+and the publish worker. Both run the same image with a different start command,
+so they are provably the same build.
 
 ## 1. Create the project
 
@@ -106,15 +107,41 @@ Rotation is supported and is not a flag day:
 4. Only then remove `k1`. Removing it while any secret still references it makes
    those secrets permanently unreadable.
 
+## Adding the worker service
+
+Create a second Railway service from the same repository and point it at
+`railway.worker.json`:
+
+```sh
+railway add --service worker
+railway variables --service worker --set "DATABASE_URL=\${{Postgres.DATABASE_URL}}"
+railway variables --service worker --set "CREDENTIAL_KEYS=<same as the API>"
+railway variables --service worker --set "SERVICE_NAME=smm-worker"
+```
+
+It needs the same credential keys as the API, because it decrypts the same
+connection tokens.
+
+The worker has no health check because it serves no traffic: it polls, and a
+platform probe against a process with no listener would fail permanently. Its
+liveness signal is its log output.
+
+Running several replicas is safe. Work is claimed with `FOR UPDATE SKIP LOCKED`,
+so a row held by one worker is invisible to the others rather than contended —
+verified against Postgres: two workers claiming simultaneously take one row
+between them, not one each.
+
 ## What is not here yet
 
 Being explicit, because a deployment guide that implies more than exists is
 worse than none:
 
-- **No worker service.** The publish dispatcher is not built, so nothing is
-  published on a schedule yet.
-- **No platform adapters.** The contract exists; no network client implements
-  it. Bluesky is first because AT Protocol needs no approval.
+- **Only Bluesky has an adapter.** Every other network parks its posts with a
+  clear reason rather than failing obscurely. Bluesky came first because AT
+  Protocol needs no approved developer application.
+- **Connecting an account is not exposed over HTTP yet.** The Bluesky adapter
+  implements the connect flow, but no API route drives it, so credentials
+  cannot yet be added through the product.
 - **No email.** Verification and password-reset tokens are modelled in the
   schema but nothing sends them.
 - **No object storage.** Media upload needs an S3-compatible bucket.
