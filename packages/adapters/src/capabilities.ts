@@ -15,6 +15,23 @@ import type { NetworkId } from './networks.js';
  * accepts cannot drift apart.
  */
 
+/**
+ * How well established a figure is.
+ *
+ * Not every number in a descriptor is equally solid. Some are documented and
+ * queryable; others are pieced together from changelogs and third-party
+ * reports that contradict each other. Recording which is which stops a figure
+ * that was a best guess from being read months later as though it were fact —
+ * particularly for pricing, where a wrong number becomes a wrong invoice.
+ */
+export type Confidence =
+  /** Confirmed against the platform's own documentation or API. */
+  | 'verified'
+  /** Sources disagree. Usable for warnings, never for money. */
+  | 'contested'
+  /** Believed but unconfirmed. */
+  | 'unverified';
+
 export interface TextCapability {
   /** Maximum body length, measured with `counting`. */
   readonly maxLength: number;
@@ -132,6 +149,13 @@ export interface PublishingLimits {
   readonly costPerPostUsd?: number | undefined;
   /** Surcharge when the post contains a link, where one applies. */
   readonly costPerPostWithLinkUsd?: number | undefined;
+  /**
+   * Confidence in the cost figures above.
+   *
+   * Billing must refuse anything that is not `verified`. Charging a customer
+   * based on a number we guessed is worse than not charging them.
+   */
+  readonly costConfidence?: Confidence | undefined;
   /**
    * Days a brand-new account must age before publishing reliably succeeds.
    * Pinterest is the known case.

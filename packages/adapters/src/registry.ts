@@ -254,10 +254,18 @@ export const X: PlatformCapabilities = {
   sources: ['https://docs.x.com/x-api', 'research/06-platform-apis-tier1.md'],
   publishing: {
     rejectsDuplicateContent: true,
-    // X is the only major network that charges per write. Surfacing the cost
-    // here lets the scheduler reason about spend, not just rate limits.
+    // X is the only major network that charges per write, which makes the
+    // figure load-bearing for both scheduling and pricing.
+    //
+    // UNVERIFIED, and flagged as the single highest-consequence unconfirmed
+    // fact in the research: at 100k link-posts a month the difference between
+    // these numbers and the real ones is roughly $20k of monthly cost. They are
+    // recorded so the scheduler can warn about spend, and marked so billing
+    // refuses to read them until someone confirms them against the developer
+    // portal.
     costPerPostUsd: 0.015,
     costPerPostWithLinkUsd: 0.2,
+    costConfidence: 'unverified',
   },
   read: {
     comments: true,
