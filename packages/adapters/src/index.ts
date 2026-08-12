@@ -23,3 +23,4 @@ export * from './adapter.js';
 // Network implementations. Exported from the package root so a service wires an
 // adapter by importing it, not by reaching into a file path.
 export * from './networks/bluesky.js';
+export * from './networks/mastodon.js';
