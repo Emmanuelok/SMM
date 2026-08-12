@@ -1,7 +1,14 @@
 {
   "files": [],
   "references": [
-    { "path": "./packages/shared" },
-    { "path": "./packages/adapters" }
+    {
+      "path": "./packages/shared"
+    },
+    {
+      "path": "./packages/adapters"
+    },
+    {
+      "path": "./packages/scheduler"
+    }
   ]
 }
