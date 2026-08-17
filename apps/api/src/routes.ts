@@ -520,11 +520,18 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
         target_status: string;
         remote_url: string | null;
         failure_message: string | null;
+        next_attempt_at: Date | null;
+        from_queue: boolean;
       }[]
     >`
       SELECT p.id, p.body, p.status, t.network, t.scheduled_at,
              t.scheduled_local, t.scheduled_timezone,
-             t.status AS target_status, t.remote_url, t.failure_message
+             t.status AS target_status, t.remote_url, t.failure_message,
+             -- A failed target still owed an attempt is not the same thing as
+             -- one that gave up, and showing both as "failed" tells someone to
+             -- go and fix something that is already fixing itself.
+             t.next_attempt_at,
+             (t.queue_slot_id IS NOT NULL) AS from_queue
       FROM posts p
       JOIN post_targets t ON t.post_id = p.id
       WHERE p.organization_id = ${user.organizationId} AND p.deleted_at IS NULL

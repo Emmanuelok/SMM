@@ -18,7 +18,14 @@ import type { OrganizationId } from '@smm/shared';
  * testable without a database, which is what made it testable at all.
  */
 
-/** Statuses that still occupy a slot. A cancelled post frees its time. */
+/**
+ * Statuses that still occupy a slot. A cancelled post frees its time.
+ *
+ * `failed` is absent even though a failed target may still be owed a retry, and
+ * that is safe rather than an oversight: a target cannot fail before its
+ * scheduled instant has passed, and the queue only ever offers instants in the
+ * future. A retrying post's slot is therefore never on offer to begin with.
+ */
 const LIVE_STATUSES = ['pending', 'scheduled', 'publishing'] as const;
 
 /** How far ahead a queue will place a post before declaring itself full. */

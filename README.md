@@ -72,7 +72,10 @@ TEST_DATABASE_URL=postgres://localhost/smm_test npm test
 ```
 
 Each of those tests creates and deletes its own tenant, so the database it runs
-against is not left dirty — but point it at a scratch one anyway.
+against is not left dirty — but point it at a scratch one anyway. Test files run
+one at a time (`--test-concurrency=1`), because the dispatcher claims work
+across the whole database by design and a suite running beside it would be
+competing for the same rows.
 
 Deployment is documented in [DEPLOYMENT.md](DEPLOYMENT.md).
 

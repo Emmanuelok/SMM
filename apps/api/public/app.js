@@ -599,12 +599,21 @@ function renderPosts(posts) {
     when.textContent = post.scheduled_local
       ? `${String(post.scheduled_local).replace('T', ' ').slice(0, 16)} ${post.scheduled_timezone ?? ''}`
       : '—';
+    if (post.from_queue) {
+      const tag = document.createElement('div');
+      tag.className = 'hint';
+      tag.textContent = 'from the queue';
+      when.append(tag);
+    }
     row.append(when);
 
     const status = document.createElement('td');
+    // A failure that will be retried is not a failure the user has to act on,
+    // and labelling it "failed" sends them to fix something already in hand.
+    const retrying = post.target_status === 'failed' && post.next_attempt_at !== null;
     const badge = document.createElement('span');
-    badge.className = `badge ${post.target_status}`;
-    badge.textContent = post.target_status.replace(/_/g, ' ');
+    badge.className = `badge ${retrying ? 'scheduled' : post.target_status}`;
+    badge.textContent = retrying ? 'retrying' : post.target_status.replace(/_/g, ' ');
     status.append(badge);
 
     if (post.remote_url) {
@@ -619,7 +628,9 @@ function renderPosts(posts) {
     if (post.failure_message) {
       const why = document.createElement('div');
       why.className = 'hint';
-      why.textContent = post.failure_message;
+      why.textContent = retrying
+        ? `${post.failure_message} Trying again ${new Date(post.next_attempt_at).toLocaleTimeString()}.`
+        : post.failure_message;
       status.append(why);
     }
     row.append(status);

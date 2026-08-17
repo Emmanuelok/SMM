@@ -62,6 +62,14 @@ export interface DispatchOutcome {
  * The status moves to `publishing` inside the same transaction that takes the
  * lock. A worker that dies after this leaves the row in `publishing`, which is
  * recoverable and, crucially, distinguishable from work nobody has started.
+ *
+ * Two kinds of row are due, and missing the second one made every retry a
+ * silent permanent failure: a first attempt, which is `scheduled` or `pending`
+ * and past its time, and a *re*-attempt, which a previous failure left as
+ * `failed` carrying the moment to try again. Both partial indexes on
+ * `post_targets` exist for exactly this pair — `post_targets_due_idx` for the
+ * first, `post_targets_retry_idx` for the second — and Postgres reads them
+ * together rather than scanning.
  */
 export async function claimDueTargets(
   sql: Sql,
@@ -88,11 +96,22 @@ export async function claimDueTargets(
       JOIN posts p ON p.id = t.post_id
       LEFT JOIN post_versions v ON v.id = t.post_version_id
       WHERE t.dispatch = 'our_dispatcher'
-        AND t.status IN ('scheduled', 'pending')
-        AND t.scheduled_at IS NOT NULL
-        AND t.scheduled_at <= ${now}
-        AND (t.next_attempt_at IS NULL OR t.next_attempt_at <= ${now})
-      ORDER BY t.scheduled_at
+        AND (
+          (t.status IN ('scheduled', 'pending')
+            AND t.scheduled_at IS NOT NULL
+            AND t.scheduled_at <= ${now}
+            AND (t.next_attempt_at IS NULL OR t.next_attempt_at <= ${now}))
+          OR
+          -- A retry. A NULL next_attempt_at is what distinguishes a failure we
+          -- gave up on from one still owed another attempt, so a terminal
+          -- failure is never picked up again by this branch.
+          (t.status = 'failed'
+            AND t.next_attempt_at IS NOT NULL
+            AND t.next_attempt_at <= ${now})
+        )
+      -- By the moment each row became due, so a retry that is already late is
+      -- not overtaken by work scheduled after it.
+      ORDER BY COALESCE(t.next_attempt_at, t.scheduled_at)
       LIMIT ${limit}
       FOR UPDATE OF t SKIP LOCKED
     `;
