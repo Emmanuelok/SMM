@@ -266,3 +266,121 @@ details summary {
   color: var(--error);
   font-weight: 600;
 }
+
+/* --- posting queue -------------------------------------------------------- */
+
+.modes {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  margin: 14px 0 4px;
+}
+
+.modes legend {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  padding: 0 4px;
+}
+
+.choice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 400;
+  margin: 4px 0;
+  cursor: pointer;
+}
+
+.choice input {
+  width: auto;
+  margin: 0;
+}
+
+/*
+ * Seven columns that collapse rather than scroll. A week that needs horizontal
+ * scrolling on a phone is a week nobody edits on a phone.
+ */
+.week {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 8px;
+  margin: 14px 0;
+}
+
+@media (max-width: 640px) {
+  .week {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.day {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.day h4 {
+  margin: 0;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+/*
+ * A slot is a button because clicking it removes it, and a div that deletes
+ * data is unreachable by keyboard.
+ */
+.chip {
+  width: 100%;
+  padding: 4px 8px;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.chip:hover,
+.chip:focus-visible {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+/* Removal is destructive, so it should not be a silent hover affordance. */
+.chip:hover::after,
+.chip:focus-visible::after {
+  content: ' ×';
+}
+
+.align-end {
+  display: flex;
+  align-items: flex-end;
+}
+
+button.secondary {
+  width: 100%;
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--line);
+  font-weight: 600;
+}
+
+button.secondary:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+button.secondary:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}

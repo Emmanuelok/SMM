@@ -5,23 +5,25 @@ many networks.
 
 ## State
 
-Early, but end to end. You can sign up, connect a Bluesky account, schedule a
-post, and the worker will pick it up and publish it.
+Early, but end to end. You can sign up, connect a Bluesky or Mastodon account,
+set a weekly posting queue, add a post to it, and the worker will pick it up and
+publish it.
 
 | | |
 |---|---|
-| **Works** | Web UI, signup, login, sessions, connecting a Bluesky account, composing and scheduling, the publish worker |
-| **Built, not wired** | Metrics ingestion, approvals, recycling queues, media renditions, the rights ledger |
-| **Not started** | Networks other than Bluesky, media storage, email, billing |
+| **Works** | Web UI, signup, login, sessions, connecting Bluesky and Mastodon accounts, composing, posting queues, scheduling, the publish worker |
+| **Built, not wired** | Metrics ingestion, approvals, content recycling, media renditions, the rights ledger |
+| **Not started** | Networks beyond Bluesky and Mastodon, media storage, email, billing |
 
-Only Bluesky. Every other network parks its posts with a clear reason rather
-than failing obscurely, because they require an approved developer application
-first and those take weeks — see `research/06-platform-apis-tier1.md`. Bluesky
-needs none, which is why it came first.
+Two networks. Every other one parks its posts with a clear reason rather than
+failing obscurely, because they require an approved developer application first
+and those take weeks — see `research/06-platform-apis-tier1.md`. Bluesky and
+Mastodon need none, which is why they came first.
 
-The live Bluesky calls are the one thing never executed in development: the
-sandbox this was built in blocks the host. Everything either side of them is
-covered, so the first real connection is also the first real test.
+The live network calls are the one thing never executed in development: the
+sandbox this was built in blocks both hosts. Everything either side of them is
+covered — including the database, against a real Postgres — so the first real
+connection is also the first real test.
 
 ## Layout
 
@@ -59,6 +61,19 @@ npm test          # builds, then runs every test
 npm run typecheck
 ```
 
+`npm test` is hermetic: the tests that need a database skip themselves. Point
+`TEST_DATABASE_URL` at a scratch database to include them, and they will apply
+the migrations and exercise the real schema:
+
+```sh
+createdb smm_test
+DATABASE_URL=postgres://localhost/smm_test DATABASE_SSL=false node packages/db/dist/cli.js
+TEST_DATABASE_URL=postgres://localhost/smm_test npm test
+```
+
+Each of those tests creates and deletes its own tenant, so the database it runs
+against is not left dirty — but point it at a scratch one anyway.
+
 Deployment is documented in [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ## Design decisions worth knowing before reading the code
@@ -83,6 +98,21 @@ irrelevant.
 **Scheduling stores intent, not just the resulting instant.** Timezone rules
 change several times a year; keeping only the computed moment makes the
 resulting drift undetectable and uncorrectable.
+
+**A queue is a weekly grid of wall-clock times, resolved per occurrence.**
+Producing next week's slot by adding 604,800,000 milliseconds is the shortcut
+that makes a queue drift an hour away from the week its owner set up, twice a
+year, without anyone noticing — the posts still go out. Two consequences fall
+out of resolving properly and are handled rather than left to the caller: two
+slots can collapse onto one instant across a spring-forward gap, and a slot on a
+fall-back day happens twice.
+
+**The queue's race is closed by the database.** "Find a free slot, then take it"
+is a read followed by a write, and two people adding to the same queue at the
+same moment both see the same free slot. A partial unique index refuses the
+second one; the application retries rather than failing, because by then the
+next slot really is free. The index covers only queue-placed rows, so two posts
+deliberately pinned to the same minute stay legal.
 
 **Metrics carry provenance from the first row.** Platform retention windows are
 short — Pinterest 90 days, X 30, TikTok around 60 — so uncaptured data is

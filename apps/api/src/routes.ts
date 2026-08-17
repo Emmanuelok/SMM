@@ -9,7 +9,14 @@ import type { Vault } from '@smm/vault';
 
 import type { AuthenticatedUser } from './auth.js';
 import { OAuthStateStore, saveConnection } from './oauth.js';
-import { schedulePost } from './publishing.js';
+import { schedulePost, type Timing } from './publishing.js';
+import { ensureSchedule, previewQueue, replaceSlots, setPaused } from './queues.js';
+
+/**
+ * Route parameters reach Postgres as uuids. An unparseable one would raise a
+ * type error from the driver — a 500 for what is really a 404.
+ */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Connecting accounts, and composing posts.
@@ -27,13 +34,47 @@ const connectSchema = z.object({
   appPassword: z.string().min(1).max(300),
 });
 
-const scheduleSchema = z.object({
-  profileGroupId: z.string().uuid(),
-  body: z.string().min(1).max(10_000),
-  format: z.enum(['text', 'image']).default('text'),
-  socialProfileIds: z.array(z.string().uuid()).min(1).max(50),
-  scheduledLocal: z.string().min(10).max(20),
-  timezone: z.string().min(1).max(64),
+/**
+ * Composing.
+ *
+ * The time is a discriminated union rather than two optional fields, so
+ * "queued" and "scheduled for 09:00" cannot both be half-specified. `at` stays
+ * the default, which keeps every existing caller working unchanged.
+ */
+const scheduleSchema = z
+  .object({
+    profileGroupId: z.string().uuid(),
+    body: z.string().min(1).max(10_000),
+    format: z.enum(['text', 'image']).default('text'),
+    socialProfileIds: z.array(z.string().uuid()).min(1).max(50),
+    mode: z.enum(['at', 'queue']).default('at'),
+    scheduledLocal: z.string().min(10).max(20).optional(),
+    timezone: z.string().min(1).max(64).optional(),
+    categoryId: z.string().uuid().optional(),
+  })
+  .refine(
+    (value) => value.mode === 'queue' || (value.scheduledLocal !== undefined && value.timezone !== undefined),
+    { message: 'A scheduled post needs both a local time and a timezone.', path: ['scheduledLocal'] },
+  );
+
+const slotsSchema = z.object({
+  slots: z
+    .array(
+      z.object({
+        dayOfWeek: z.number().int().min(0).max(6),
+        localTime: z.string().regex(/^\d{2}:\d{2}(:\d{2})?$/, 'Use HH:MM.'),
+        categoryId: z.string().uuid().nullable().optional(),
+        acceptsFormats: z.array(z.string().max(40)).max(10).optional(),
+      }),
+    )
+    // A cap, because a slot is cheap to add and a week with ten thousand of them
+    // makes every queue read slow for everyone sharing the database.
+    .max(200),
+});
+
+const pauseSchema = z.object({
+  paused: z.boolean(),
+  reason: z.string().max(200).optional(),
 });
 
 export interface RouteDeps {
@@ -338,25 +379,129 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
       return reply.code(400).send({ error: 'invalid_request', issues: parsed.error.issues });
     }
 
-    try {
-      const result = await schedulePost(sql, user.organizationId as OrganizationId, parsed.data);
-      if (!result.ok) {
-        return reply.code(400).send({
-          error: result.reason,
-          message: result.message,
-          issues: result.issues,
-        });
-      }
-      return reply.code(201).send(result);
-    } catch (error) {
-      // A wall clock inside a daylight-saving gap reaches here. It is a real
-      // user error with an actionable message, not an internal fault.
-      const message = error instanceof Error ? error.message : 'Could not schedule this post.';
-      if (/does not exist in/.test(message)) {
-        return reply.code(400).send({ error: 'unschedulable_time', message });
-      }
-      throw error;
+    const body = parsed.data;
+    const timing: Timing =
+      body.mode === 'queue'
+        ? { mode: 'queue', categoryId: body.categoryId ?? null }
+        : {
+            mode: 'at',
+            // Both are present: the schema refuses `at` without them.
+            scheduledLocal: body.scheduledLocal ?? '',
+            timezone: body.timezone ?? '',
+          };
+
+    const result = await schedulePost(sql, user.organizationId as OrganizationId, {
+      profileGroupId: body.profileGroupId,
+      body: body.body,
+      format: body.format,
+      socialProfileIds: body.socialProfileIds,
+      timing,
+    });
+
+    if (!result.ok) {
+      return reply.code(400).send({
+        error: result.reason,
+        message: result.message,
+        issues: result.issues,
+      });
     }
+    return reply.code(201).send(result);
+  });
+
+  /**
+   * The posting queue for one account.
+   *
+   * A GET creates the default week if there is none, so the editor always has
+   * something to show. An empty grid with an "add your first time" prompt is a
+   * question nobody can answer before they have posted anything.
+   */
+  app.get('/api/social-profiles/:id/queue', async (request, reply) => {
+    const user = await requireUser(request, reply);
+    if (user === undefined) return reply;
+
+    const { id } = request.params as { id: string };
+    if (!UUID.test(id)) return reply.code(404).send({ error: 'unknown_profile' });
+
+    const query = request.query as { limit?: string };
+    const requested = Number(query.limit ?? 20);
+    const limit = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), 100) : 20;
+
+    const schedule = await ensureSchedule(sql, user.organizationId as OrganizationId, id);
+    if (schedule === undefined) return reply.code(404).send({ error: 'unknown_profile' });
+
+    return reply.send({
+      schedule: {
+        id: schedule.id,
+        timezone: schedule.timezone,
+        paused: schedule.pausedAt != null,
+        pauseReason: schedule.pauseReason,
+        slots: schedule.slots,
+      },
+      upcoming: await previewQueue(sql, schedule, limit),
+    });
+  });
+
+  /** Replace the week. Wholesale, because the editor is a grid. */
+  app.put('/api/social-profiles/:id/queue/slots', async (request, reply) => {
+    const user = await requireUser(request, reply);
+    if (user === undefined) return reply;
+
+    const { id } = request.params as { id: string };
+    if (!UUID.test(id)) return reply.code(404).send({ error: 'unknown_profile' });
+
+    const parsed = slotsSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'invalid_request', issues: parsed.error.issues });
+    }
+
+    const schedule = await ensureSchedule(sql, user.organizationId as OrganizationId, id);
+    if (schedule === undefined) return reply.code(404).send({ error: 'unknown_profile' });
+
+    const result = await replaceSlots(
+      sql,
+      user.organizationId as OrganizationId,
+      schedule.id,
+      parsed.data.slots,
+    );
+    if (!result.ok) {
+      return reply.code(400).send({ error: 'invalid_slots', problems: result.problems });
+    }
+
+    return reply.send({ slots: result.slots });
+  });
+
+  /**
+   * Hold, or resume.
+   *
+   * Pausing keeps the slots. A crisis hold that made someone rebuild their week
+   * afterwards would not get used, and the posts that should have been held
+   * would go out instead.
+   */
+  app.post('/api/social-profiles/:id/queue/pause', async (request, reply) => {
+    const user = await requireUser(request, reply);
+    if (user === undefined) return reply;
+
+    const { id } = request.params as { id: string };
+    if (!UUID.test(id)) return reply.code(404).send({ error: 'unknown_profile' });
+
+    const parsed = pauseSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'invalid_request', issues: parsed.error.issues });
+    }
+
+    const schedule = await ensureSchedule(sql, user.organizationId as OrganizationId, id);
+    if (schedule === undefined) return reply.code(404).send({ error: 'unknown_profile' });
+
+    const updated = await setPaused(
+      sql,
+      user.organizationId as OrganizationId,
+      schedule.id,
+      parsed.data.paused,
+      parsed.data.reason,
+    );
+    if (!updated) return reply.code(404).send({ error: 'unknown_profile' });
+
+    return reply.send({ paused: parsed.data.paused });
   });
 
   app.get('/api/posts', async (request, reply) => {

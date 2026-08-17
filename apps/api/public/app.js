@@ -249,6 +249,60 @@ $('compose-body').addEventListener('input', () => {
   counter.parentElement.classList.toggle('over-limit', count > BLUESKY_LIMIT);
 });
 
+function composeMode() {
+  return document.querySelector('input[name=when-mode]:checked')?.value ?? 'queue';
+}
+
+/**
+ * Show or hide the explicit time fields.
+ *
+ * `required` is toggled with them: a hidden required input blocks submission
+ * and the browser cannot focus it to explain why, which reads as a dead button.
+ */
+function applyComposeMode() {
+  const explicit = composeMode() === 'at';
+  show($('compose-at'), explicit);
+  $('compose-when').required = explicit;
+  $('compose-next').textContent = '';
+  if (!explicit) void previewNextSlot();
+}
+
+for (const radio of document.querySelectorAll('input[name=when-mode]')) {
+  radio.addEventListener('change', applyComposeMode);
+}
+$('compose-targets').addEventListener('change', () => {
+  if (composeMode() === 'queue') void previewNextSlot();
+});
+
+/**
+ * Say when a queued post would actually go out.
+ *
+ * A queue that does not tell you this is a queue you do not trust, and the
+ * first thing people do without it is stop using the queue.
+ */
+async function previewNextSlot() {
+  const first = $('compose-targets').selectedOptions[0]?.value;
+  if (!first) {
+    $('compose-next').textContent = 'Choose an account to see when this would go out.';
+    return;
+  }
+  try {
+    const { schedule, upcoming } = await api(`/api/social-profiles/${first}/queue?limit=25`);
+    if (schedule.paused) {
+      $('compose-next').textContent = 'This queue is paused. Resume it below, or pick a time.';
+      return;
+    }
+    const next = upcoming.find((slot) => slot.free);
+    $('compose-next').textContent = next
+      ? `Goes out ${formatSlot(next.local)} (${schedule.timezone}).`
+      : 'No free time in this queue. Add more times below, or pick one.';
+  } catch {
+    // The compose form still works without the preview; a failed hint must not
+    // block posting.
+    $('compose-next').textContent = '';
+  }
+}
+
 onSubmit($('form-compose'), async () => {
   setError($('compose-error'), '');
   show($('compose-ok'), false);
@@ -259,6 +313,8 @@ onSubmit($('form-compose'), async () => {
     return;
   }
 
+  const mode = composeMode();
+
   try {
     const result = await api('/api/posts', {
       method: 'POST',
@@ -266,35 +322,228 @@ onSubmit($('form-compose'), async () => {
         profileGroupId: state.profileGroupId,
         body: $('compose-body').value,
         socialProfileIds: targets,
+        mode,
         // Sent as a wall clock, never as an instant: the server records the
         // zone alongside it so a timezone rule change stays correctable.
-        scheduledLocal: $('compose-when').value.slice(0, 16),
-        timezone: $('compose-tz').value,
+        ...(mode === 'at'
+          ? {
+              scheduledLocal: $('compose-when').value.slice(0, 16),
+              timezone: $('compose-tz').value,
+            }
+          : {}),
       }),
     });
 
-    const when = new Date(result.targets[0]?.scheduledAt);
-    $('compose-ok').textContent = `Scheduled for ${when.toLocaleString()}.`;
+    const target = result.targets[0];
+    const when = new Date(target?.scheduledAt);
+    const shifted =
+      target?.resolution === 'shifted'
+        ? ' The time you picked does not exist that day — the clocks skip it — so it will go out at the first moment that does.'
+        : '';
+    $('compose-ok').textContent =
+      `${target?.fromQueue ? 'Queued for' : 'Scheduled for'} ${when.toLocaleString()}.${shifted}`;
     show($('compose-ok'), true);
     $('compose-body').value = '';
     $('counter').textContent = '0';
     await refresh();
+    if (composeMode() === 'queue') await previewNextSlot();
   } catch (error) {
     setError($('compose-error'), error.message);
   }
 });
 
+// --- posting times ----------------------------------------------------------
+
+const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+/** `2026-06-10T09:00` in the reader's own locale, without inventing a zone. */
+function formatSlot(local) {
+  const [date, time] = String(local).split('T');
+  const parts = (date ?? '').split('-').map(Number);
+  if (parts.length !== 3 || parts.some(Number.isNaN)) return String(local);
+  // Constructed as UTC and formatted as UTC, so the wall clock the server
+  // resolved is displayed unchanged rather than converted into the browser's
+  // zone — which would show the wrong time for an account in another country.
+  const at = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+  const day = at.toLocaleDateString(undefined, {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+    timeZone: 'UTC',
+  });
+  return `${day}, ${time ?? ''}`;
+}
+
+/** `HH:MM` from whatever the server stored, which includes seconds. */
+function shortTime(value) {
+  return String(value).slice(0, 5);
+}
+
+function renderWeek(slots) {
+  const container = $('queue-week');
+  container.innerHTML = '';
+
+  // Monday first. The week does not start on the same day everywhere, but a
+  // grid that puts Sunday first for a European team reads as a bug.
+  for (const day of [1, 2, 3, 4, 5, 6, 0]) {
+    const column = document.createElement('div');
+    column.className = 'day';
+
+    const heading = document.createElement('h4');
+    heading.textContent = DAY_NAMES[day].slice(0, 3);
+    column.append(heading);
+
+    const times = slots
+      .filter((slot) => slot.dayOfWeek === day)
+      .sort((a, b) => a.localTime.localeCompare(b.localTime));
+
+    if (times.length === 0) {
+      const none = document.createElement('span');
+      none.className = 'muted';
+      none.textContent = '—';
+      column.append(none);
+    }
+
+    for (const slot of times) {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'chip';
+      chip.textContent = shortTime(slot.localTime);
+      chip.title = `Remove ${shortTime(slot.localTime)} on ${DAY_NAMES[day]}`;
+      chip.setAttribute('aria-label', chip.title);
+      chip.addEventListener('click', () => removeSlot(slot));
+      column.append(chip);
+    }
+
+    container.append(column);
+  }
+}
+
+function renderUpcoming(upcoming) {
+  const list = $('queue-upcoming');
+  list.innerHTML = '';
+
+  if (upcoming.length === 0) {
+    const li = document.createElement('li');
+    li.className = 'muted';
+    li.textContent = 'No times set, so nothing is coming up.';
+    list.append(li);
+    return;
+  }
+
+  for (const slot of upcoming.slice(0, 10)) {
+    const li = document.createElement('li');
+    const when = document.createElement('span');
+    when.textContent = formatSlot(slot.local);
+    li.append(when);
+
+    const badge = document.createElement('span');
+    badge.className = `badge ${slot.free ? 'scheduled' : 'published'}`;
+    badge.textContent = slot.free ? 'open' : 'taken';
+    li.append(badge);
+
+    // Worth saying out loud: this is the twice-a-year case people notice.
+    if (slot.resolution === 'shifted') {
+      const note = document.createElement('span');
+      note.className = 'hint';
+      note.textContent = 'moved — the clocks skip this time';
+      li.append(note);
+    }
+    list.append(li);
+  }
+}
+
+async function loadQueue() {
+  const profileId = $('queue-profile').value;
+  if (!profileId) return;
+  setError($('queue-error'), '');
+
+  try {
+    const { schedule, upcoming } = await api(`/api/social-profiles/${profileId}/queue?limit=25`);
+    state.queue = schedule;
+    $('queue-zone').textContent = `Times are in ${schedule.timezone}, this account's timezone.`;
+    $('queue-pause').textContent = schedule.paused ? 'Resume queue' : 'Pause queue';
+    renderWeek(schedule.slots);
+    renderUpcoming(upcoming);
+  } catch (error) {
+    setError($('queue-error'), error.message);
+  }
+}
+
+/** Send the whole week. The editor is a grid, so a diff would only add risk. */
+async function saveWeek(slots) {
+  const profileId = $('queue-profile').value;
+  setError($('queue-error'), '');
+  try {
+    await api(`/api/social-profiles/${profileId}/queue/slots`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        slots: slots.map((slot) => ({
+          dayOfWeek: slot.dayOfWeek,
+          localTime: shortTime(slot.localTime),
+          categoryId: slot.categoryId ?? null,
+          acceptsFormats: slot.acceptsFormats ?? [],
+        })),
+      }),
+    });
+    await loadQueue();
+    if (composeMode() === 'queue') await previewNextSlot();
+  } catch (error) {
+    setError($('queue-error'), error.message);
+  }
+}
+
+function removeSlot(slot) {
+  const remaining = (state.queue?.slots ?? []).filter((s) => s.id !== slot.id);
+  void saveWeek(remaining);
+}
+
+onSubmit($('form-slot'), async () => {
+  const day = Number($('slot-day').value);
+  const time = $('slot-time').value;
+  const existing = state.queue?.slots ?? [];
+
+  if (existing.some((s) => s.dayOfWeek === day && shortTime(s.localTime) === time)) {
+    setError($('queue-error'), `${DAY_NAMES[day]} already has a post at ${time}.`);
+    return;
+  }
+  await saveWeek([...existing, { dayOfWeek: day, localTime: time }]);
+});
+
+$('queue-profile').addEventListener('change', loadQueue);
+
+$('queue-pause').addEventListener('click', async () => {
+  const profileId = $('queue-profile').value;
+  if (!profileId) return;
+  const paused = !state.queue?.paused;
+  setError($('queue-error'), '');
+  try {
+    await api(`/api/social-profiles/${profileId}/queue/pause`, {
+      method: 'POST',
+      body: JSON.stringify({ paused }),
+    });
+    await loadQueue();
+  } catch (error) {
+    setError($('queue-error'), error.message);
+  }
+});
+
 // --- state ------------------------------------------------------------------
 
-const state = { profileGroupId: null };
+const state = { profileGroupId: null, queue: null };
 
 function renderProfiles(profiles) {
   const list = $('profiles');
   const select = $('compose-targets');
+  const queueSelect = $('queue-profile');
+  const previous = queueSelect.value;
   list.innerHTML = '';
   select.innerHTML = '';
+  queueSelect.innerHTML = '';
 
   show($('profiles-empty'), profiles.length === 0);
+  // A queue editor with no accounts to edit is a dead control.
+  show($('queue-card'), profiles.length > 0);
 
   for (const profile of profiles) {
     const li = document.createElement('li');
@@ -310,10 +559,20 @@ function renderProfiles(profiles) {
     }
     list.append(li);
 
+    const label = `${profile.network} — ${profile.handle ?? profile.display_name}`;
+
     const option = document.createElement('option');
     option.value = profile.id;
-    option.textContent = `${profile.network} — ${profile.handle ?? profile.display_name}`;
+    option.textContent = label;
     select.append(option);
+
+    const queueOption = document.createElement('option');
+    queueOption.value = profile.id;
+    queueOption.textContent = label;
+    // Keeps the editor on the account being edited across a refresh, rather
+    // than jumping back to the first one mid-edit.
+    queueOption.selected = profile.id === previous;
+    queueSelect.append(queueOption);
   }
 }
 
@@ -390,6 +649,7 @@ async function refresh() {
   ]);
   renderProfiles(socialProfiles);
   renderPosts(posts);
+  if (socialProfiles.length > 0) await loadQueue();
 }
 
 async function start() {
@@ -405,6 +665,7 @@ async function start() {
     await renderConnectSteps();
     reportConnectOutcome();
     await refresh();
+    applyComposeMode();
   } catch (error) {
     if (error.status === 401) {
       show($('app'), false);
