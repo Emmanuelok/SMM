@@ -24,3 +24,4 @@ export * from './adapter.js';
 // adapter by importing it, not by reaching into a file path.
 export * from './networks/bluesky.js';
 export * from './networks/mastodon.js';
+export * from './safe-fetch.js';

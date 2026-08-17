@@ -29,8 +29,16 @@ function connection(): Connection {
   } as Connection;
 }
 
+/**
+ * A literal public address rather than a hostname.
+ *
+ * The adapter now resolves the server before contacting it, so a made-up
+ * hostname would fail DNS and the test would exercise the fallback instead of
+ * what it is about. A literal address needs no lookup, keeping the test
+ * hermetic while still passing through the real guard.
+ */
 const CREDENTIAL: MastodonCredential = {
-  instance: 'https://example.social',
+  instance: 'https://93.184.216.34',
   accessToken: 'token',
 };
 

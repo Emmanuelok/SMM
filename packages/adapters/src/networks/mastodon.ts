@@ -27,6 +27,7 @@ import type { IdempotencyKey, PublishHandle, PublishPhase, SingleShotHandle } fr
 import type { PostVisibility } from '../metrics.js';
 import type { NetworkId } from '../networks.js';
 import { MASTODON } from '../registry.js';
+import { BlockedHostError, safeFetch } from '../safe-fetch.js';
 
 /**
  * Mastodon, and any server speaking its API.
@@ -182,6 +183,13 @@ export class MastodonAdapter implements PlatformAdapter {
   }
 
   classify(error: unknown): PublishFailure {
+    if (error instanceof BlockedHostError) {
+      // Not a platform error at all — the address was refused before any
+      // request left the process. Said plainly, because the alternative reads
+      // as "that server is down" and sends the user looking in the wrong place.
+      return failure('destination_invalid', error.message);
+    }
+
     if (!isHttpFailure(error)) {
       if (error instanceof Error && /fetch failed|ECONNRESET|ETIMEDOUT/i.test(error.message)) {
         return failure('transient', 'Could not reach the Mastodon server. Retrying shortly.');
@@ -249,7 +257,10 @@ export class MastodonAdapter implements PlatformAdapter {
       headers['Idempotency-Key'] = options.idempotencyKey;
     }
 
-    const response = await fetch(new URL(path, instance), {
+    // safeFetch rather than fetch, because `instance` is typed by the user.
+    // Without the check, "https://169.254.169.254" is a valid answer to "which
+    // Mastodon server do you use?" and we would dutifully fetch it.
+    const response = await safeFetch(new URL(path, instance), {
       method: options.method ?? 'GET',
       headers,
       ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
