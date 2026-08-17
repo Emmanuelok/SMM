@@ -4,6 +4,10 @@ What exists today deploys as **two services plus a Postgres database**: the API,
 and the publish worker. Both run the same image with a different start command,
 so they are provably the same build.
 
+> **Already deployed and looking at the setup page?** [GO-LIVE.md](GO-LIVE.md)
+> is the click-by-click sequence from there to a working platform — no
+> terminal required. This document is the reference behind it.
+
 ## 1. Create the project
 
 ```sh
