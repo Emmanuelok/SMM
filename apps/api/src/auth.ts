@@ -1,3 +1,5 @@
+import { isIP } from 'node:net';
+
 import type { FastifyReply, FastifyRequest } from 'fastify';
 
 import type { Sql } from '@smm/db';
@@ -166,9 +168,12 @@ export async function login(
   context: { readonly ip?: string | undefined; readonly userAgent?: string | undefined },
   sessionTtlHours: number,
 ): Promise<LoginResult> {
-  if (await isThrottled(sql, email, context.ip)) {
-    return { ok: false, reason: 'throttled' };
-  }
+  // Measured, but not acted on yet. Refusing here would mean a correct password
+  // is rejected because someone else spent the account's attempt budget — ten
+  // wrong guesses against a known address would lock its owner out indefinitely,
+  // renewable every fifteen minutes. Throttling exists to slow down wrong
+  // answers, and it must never block a right one.
+  const throttled = await isThrottled(sql, email, normalizeIp(context.ip));
 
   const rows = await sql<{ id: string; password_hash: string; status: string }[]>`
     SELECT u.id, p.password_hash, u.status
@@ -182,16 +187,25 @@ export async function login(
   if (record === undefined) {
     // Burn comparable work so a missing account is not detectable by timing.
     await verifyPassword(password, DUMMY_HASH);
-    await recordAttempt(sql, email, context.ip, false);
-    return { ok: false, reason: 'invalid_credentials' };
+    await recordAttempt(sql, email, normalizeIp(context.ip), false);
+    return { ok: false, reason: throttled ? 'throttled' : 'invalid_credentials' };
   }
 
   const valid = await verifyPassword(password, record.password_hash);
-  await recordAttempt(sql, email, context.ip, valid);
+  await recordAttempt(sql, email, normalizeIp(context.ip), valid);
 
   if (!valid || record.status === 'suspended') {
-    return { ok: false, reason: 'invalid_credentials' };
+    // Only a wrong answer is refused for being throttled. A right one proceeds.
+    return { ok: false, reason: throttled ? 'throttled' : 'invalid_credentials' };
   }
+
+  // The password was correct, so the failures that accumulated against this
+  // address were somebody else guessing. Clearing them stops an attacker
+  // holding the account at its limit forever.
+  await sql`
+    DELETE FROM login_attempts
+    WHERE email = ${email} AND successful = false
+  `;
 
   // The plaintext is only available here, so this is the one moment an old hash
   // can be upgraded without involving the user.
@@ -233,6 +247,19 @@ export async function login(
 const DUMMY_HASH =
   'scrypt$65536$8$1$64$AAAAAAAAAAAAAAAAAAAAAA$' +
   'ZGVsaWJlcmF0ZWx5LW5vdC1hLXJlYWwtaGFzaC1qdXN0LXNvbWV0aGluZy10by1jb21wYXJl';
+
+/**
+ * Keep only a value Postgres will accept in an `inet` column.
+ *
+ * `request.ip` is derived from a header. Even with the proxy hop count set
+ * correctly it is worth not trusting: an unparseable value reaches an `inet`
+ * column and the insert throws, turning a malformed header into a failed login
+ * for everyone whose request happens to carry one.
+ */
+function normalizeIp(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  return isIP(value) === 0 ? undefined : value;
+}
 
 async function isThrottled(
   sql: Sql,

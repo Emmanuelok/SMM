@@ -111,7 +111,9 @@ export async function buildServer(options: BuildOptions): Promise<FastifyInstanc
         remove: true,
       },
     },
-    trustProxy: config.TRUST_PROXY,
+    // A hop count, not a boolean. See TRUST_PROXY_HOPS in config.ts: a boolean
+    // hands request.ip to the client, and every limit keyed on it stops working.
+    trustProxy: config.TRUST_PROXY_HOPS,
     // Bounds a slow-client attack: a request body that trickles in forever
     // otherwise holds a connection indefinitely.
     requestTimeout: 30_000,

@@ -44,17 +44,23 @@ const schema = z.object({
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
 
   /**
-   * Trust `X-Forwarded-*`.
+   * How many proxies sit in front of this service.
    *
-   * On behind Railway's proxy, which terminates TLS — without it every client
-   * appears to come from the proxy's address and per-IP rate limiting protects
-   * nothing. It must stay off when not behind a trusted proxy, since the header
-   * is then attacker-controlled and rate limits become trivially evadable.
+   * A count, never a boolean. `trustProxy: true` tells Fastify to trust the
+   * whole `X-Forwarded-For` chain, and it then takes the **leftmost** entry as
+   * the client address. A proxy appends to that header, so the leftmost entry
+   * is whatever the client wrote — `request.ip` becomes an arbitrary
+   * attacker-supplied string, and every rate limit and per-IP throttle keyed on
+   * it silently protects nothing. Worse, an attacker can set it to someone
+   * else's address and get them throttled.
+   *
+   * A count makes Fastify skip exactly that many entries from the right and use
+   * the address the proxy itself observed, which the client cannot forge. One
+   * is correct behind a single proxy, which is what Railway, Render and Fly
+   * each provide. Zero disables the header entirely and is correct when nothing
+   * trusted sits in front.
    */
-  TRUST_PROXY: z
-    .enum(['true', 'false'])
-    .default('true')
-    .transform((value) => value === 'true'),
+  TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(10).default(1),
 });
 
 export type Config = Readonly<z.infer<typeof schema>>;
