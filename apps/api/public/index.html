@@ -97,6 +97,20 @@
             </form>
             <p id="connect-error" class="error" role="alert" hidden></p>
           </details>
+
+          <details id="connect-mastodon">
+            <summary>Connect Mastodon</summary>
+            <form id="form-mastodon">
+              <label for="mastodon-instance">Your server</label>
+              <input id="mastodon-instance" placeholder="mastodon.social" required />
+              <p class="hint">
+                The server your account lives on. You will be sent there to approve access
+                and returned here afterwards.
+              </p>
+              <button type="submit" class="primary">Continue to your server</button>
+            </form>
+            <p id="mastodon-error" class="error" role="alert" hidden></p>
+          </details>
         </section>
 
         <section class="card">

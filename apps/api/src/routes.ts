@@ -1,5 +1,5 @@
-import { BlueskyAdapter } from '@smm/adapters';
-import { CredentialVault, blueskyCredentials } from '@smm/credentials';
+import { BlueskyAdapter, MastodonAdapter, isAuthRedirect, normalizeInstance } from '@smm/adapters';
+import { CredentialVault, blueskyCredentials, mastodonCredentials } from '@smm/credentials';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 
@@ -8,6 +8,7 @@ import { unsafeId, type OrganizationId } from '@smm/shared';
 import type { Vault } from '@smm/vault';
 
 import type { AuthenticatedUser } from './auth.js';
+import { OAuthStateStore, saveConnection } from './oauth.js';
 import { schedulePost } from './publishing.js';
 
 /**
@@ -38,6 +39,8 @@ const scheduleSchema = z.object({
 export interface RouteDeps {
   readonly sql: Sql;
   readonly vault: Vault;
+  /** Public origin, used to build the OAuth redirect a network must return to. */
+  readonly publicUrl: string;
   readonly requireUser: (
     request: FastifyRequest,
     reply: FastifyReply,
@@ -48,6 +51,25 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
   const { sql, vault, requireUser } = deps;
   const credentials = new CredentialVault(sql, vault);
   const bluesky = new BlueskyAdapter(blueskyCredentials(credentials));
+  const mastodon = new MastodonAdapter(mastodonCredentials(credentials));
+  const oauthStates = new OAuthStateStore(sql, vault);
+
+  /** Where a network sends the user back. Must match what was registered. */
+  const callbackUrl = (network: string): string =>
+    new URL(`/api/networks/${network}/callback`, deps.publicUrl).toString();
+
+  /** Confirm a brand belongs to the caller before anything is attached to it. */
+  async function ownedGroup(
+    organizationId: AuthenticatedUser['organizationId'],
+    profileGroupId: string,
+  ): Promise<string | undefined> {
+    const [group] = await sql<{ id: string }[]>`
+      SELECT id FROM profile_groups
+      WHERE id = ${profileGroupId} AND organization_id = ${organizationId}
+        AND deleted_at IS NULL
+    `;
+    return group?.id;
+  }
 
   /**
    * What a network needs in order to be connected.
@@ -61,22 +83,153 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     if (user === undefined) return reply;
 
     const { network } = request.params as { network: string };
-    if (network !== 'bluesky') {
-      return reply.code(404).send({
-        error: 'network_unavailable',
-        message: `${network} cannot be connected in this deployment yet.`,
-      });
+
+    if (network === 'bluesky') {
+      return reply.send(
+        await bluesky.beginAuth({
+          network: 'bluesky',
+          organizationId: user.organizationId,
+          app: { kind: 'shared', appId: unsafeId('sharedapp') },
+          requestedScopes: [],
+          redirectUri: '',
+          state: '',
+        }),
+      );
     }
 
-    const start = await bluesky.beginAuth({
-      network: 'bluesky',
-      organizationId: user.organizationId,
-      app: { kind: 'shared', appId: unsafeId('sharedapp') },
-      requestedScopes: [],
-      redirectUri: '',
-      state: '',
+    if (network === 'mastodon') {
+      const query = request.query as { instance?: string; profileGroupId?: string };
+      const typed = query.instance;
+
+      // First pass: no server yet, so the adapter can only ask which one. It
+      // cannot produce a redirect because the client does not exist until it is
+      // registered on a specific server.
+      if (typed === undefined || typed.trim() === '') {
+        return reply.send(
+          await mastodon.beginAuth({
+            network: 'mastodon',
+            organizationId: user.organizationId,
+            app: { kind: 'shared', appId: unsafeId('sharedapp') },
+            requestedScopes: [],
+            redirectUri: callbackUrl('mastodon'),
+            state: '',
+          }),
+        );
+      }
+
+      const profileGroupId = query.profileGroupId;
+      if (profileGroupId === undefined) {
+        return reply.code(400).send({ error: 'profile_group_required' });
+      }
+      const group = await ownedGroup(user.organizationId, profileGroupId);
+      if (group === undefined) return reply.code(404).send({ error: 'unknown_profile_group' });
+
+      try {
+        const instance = normalizeInstance(typed);
+        const redirectUri = callbackUrl('mastodon');
+
+        // Second pass: the adapter registers a client on that server and hands
+        // back a consent URL. The client credentials exist nowhere else, so
+        // they are stored with the state or the callback cannot redeem the code.
+        const started = await mastodon.beginAuth({
+          network: 'mastodon',
+          organizationId: user.organizationId,
+          app: { kind: 'shared', appId: unsafeId('sharedapp') },
+          requestedScopes: ['read', 'write'],
+          redirectUri,
+          state: '',
+          inputs: { instance },
+        });
+
+        if (!isAuthRedirect(started)) return reply.send(started);
+
+        const authorize = new URL(started.redirectUrl);
+        const state = await oauthStates.begin({
+          organizationId: user.organizationId,
+          userId: user.userId,
+          profileGroupId: group,
+          network: 'mastodon',
+          instance,
+          clientId: authorize.searchParams.get('client_id') ?? undefined,
+          clientSecret: authorize.searchParams.get('client_secret') ?? undefined,
+          redirectUri,
+        });
+
+        // The adapter cannot mint the state — only this layer knows what it has
+        // to be bound to — so it is substituted after the URL is built.
+        authorize.searchParams.set('state', state);
+        // A registration secret must never travel in a URL the browser follows.
+        authorize.searchParams.delete('client_secret');
+
+        return reply.send({ redirectUrl: authorize.toString() });
+      } catch (error) {
+        const fault = mastodon.classify(error);
+        request.log.warn({ kind: fault.kind }, 'mastodon connect start failed');
+        return reply.code(400).send({ error: fault.kind, message: fault.message });
+      }
+    }
+
+    return reply.code(404).send({
+      error: 'network_unavailable',
+      message: `${network} cannot be connected in this deployment yet.`,
     });
-    return reply.send(start);
+  });
+
+  /**
+   * Where a network returns the user after consent.
+   *
+   * Everything except the code comes from our own stored state. The query
+   * string is a third party's input arriving in the victim's browser, and
+   * trusting the organisation or brand from it is exactly how an attacker
+   * attaches their own account to someone else's workspace.
+   */
+  app.get('/api/networks/mastodon/callback', async (request, reply) => {
+    const user = await requireUser(request, reply);
+    if (user === undefined) return reply;
+
+    const query = request.query as { code?: string; state?: string; error?: string };
+
+    if (query.error !== undefined) {
+      // The user declined, which is not a failure worth an error page.
+      return reply.redirect('/?connect=cancelled');
+    }
+    if (query.code === undefined || query.state === undefined) {
+      return reply.code(400).send({ error: 'invalid_callback' });
+    }
+
+    const claimed = await oauthStates.consume(query.state, user.organizationId);
+    if (!claimed.ok) {
+      request.log.warn({ reason: claimed.reason }, 'mastodon callback rejected');
+      return reply.redirect(`/?connect=failed&reason=${claimed.reason}`);
+    }
+
+    const pending = claimed.pending;
+    try {
+      const connections = await mastodon.completeAuth({
+        network: 'mastodon',
+        organizationId: pending.organizationId,
+        app: { kind: 'shared', appId: unsafeId('sharedapp') },
+        requestedScopes: ['read', 'write'],
+        redirectUri: pending.redirectUri,
+        state: query.state,
+        inputs: {
+          instance: pending.instance ?? '',
+          clientId: pending.clientId ?? '',
+          clientSecret: pending.clientSecret ?? '',
+        },
+        callbackParams: { code: query.code },
+      });
+
+      const connection = connections[0];
+      if (connection === undefined) return reply.redirect('/?connect=failed&reason=no_account');
+
+      await saveConnection(sql, pending.profileGroupId, connection);
+      return reply.redirect('/?connect=ok');
+    } catch (error) {
+      const fault = mastodon.classify(error);
+      request.log.warn({ kind: fault.kind }, 'mastodon callback failed');
+      return reply.redirect(`/?connect=failed&reason=${fault.kind}`);
+    }
   });
 
   /**
@@ -98,12 +251,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
         return reply.code(400).send({ error: 'invalid_request', issues: parsed.error.issues });
       }
 
-      const [group] = await sql<{ id: string }[]>`
-        SELECT id FROM profile_groups
-        WHERE id = ${parsed.data.profileGroupId}
-          AND organization_id = ${user.organizationId}
-          AND deleted_at IS NULL
-      `;
+      const group = await ownedGroup(user.organizationId, parsed.data.profileGroupId);
       if (group === undefined) {
         return reply.code(404).send({ error: 'unknown_profile_group' });
       }
@@ -127,32 +275,10 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
           return reply.code(502).send({ error: 'no_account_returned' });
         }
 
-        // Re-connecting an account already present updates it rather than
-        // creating a second row, so a reconnect after an expired credential
-        // does not silently duplicate the account in the picker.
-        const [profile] = await sql<{ id: string }[]>`
-          INSERT INTO social_profiles (
-            organization_id, profile_group_id, network, remote_account_id,
-            handle, display_name, credential_id, status
-          )
-          VALUES (
-            ${user.organizationId}, ${group.id}, 'bluesky', ${connection.account.id},
-            ${connection.account.handle ?? null}, ${connection.account.displayName},
-            ${connection.credentialId}, 'active'
-          )
-          ON CONFLICT (organization_id, network, remote_account_id)
-          DO UPDATE SET
-            credential_id = EXCLUDED.credential_id,
-            display_name  = EXCLUDED.display_name,
-            handle        = EXCLUDED.handle,
-            status        = 'active',
-            updated_at    = now()
-          RETURNING id
-        `;
-        if (profile === undefined) throw new Error('Profile upsert returned no row');
+        const socialProfileId = await saveConnection(sql, group, connection);
 
         return reply.code(201).send({
-          socialProfileId: profile.id,
+          socialProfileId,
           handle: connection.account.handle,
           displayName: connection.account.displayName,
         });

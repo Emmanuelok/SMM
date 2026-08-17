@@ -359,7 +359,7 @@ export async function buildServer(options: BuildOptions): Promise<FastifyInstanc
 
   // Connecting accounts and composing posts live in their own module; they need
   // `requireUser`, so they are registered once it exists.
-  registerRoutes(app, { sql, vault, requireUser });
+  registerRoutes(app, { sql, vault, requireUser, publicUrl: config.PUBLIC_URL });
 
   // --- errors ---------------------------------------------------------------
 

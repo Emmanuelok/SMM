@@ -193,6 +193,53 @@ onSubmit($('form-connect'), async () => {
   }
 });
 
+onSubmit($('form-mastodon'), async () => {
+  setError($('mastodon-error'), '');
+  try {
+    // The server decides where to send the user: it registers a client on that
+    // instance and mints the state that binds the callback to this workspace.
+    const start = await api(
+      `/api/networks/mastodon/connect?instance=${encodeURIComponent($('mastodon-instance').value)}` +
+        `&profileGroupId=${encodeURIComponent(state.profileGroupId ?? '')}`,
+    );
+    if (start.redirectUrl) {
+      location.href = start.redirectUrl;
+      return;
+    }
+    setError($('mastodon-error'), 'That server did not offer an authorisation page.');
+  } catch (error) {
+    setError($('mastodon-error'), error.message);
+  }
+});
+
+/**
+ * Report the outcome of a connect that happened via redirect.
+ *
+ * The callback cannot render a message itself — it has to send the browser
+ * somewhere — so the result travels back as a query parameter and is cleared
+ * from the URL once shown, to keep it out of history and out of any link the
+ * user later copies.
+ */
+function reportConnectOutcome() {
+  const params = new URLSearchParams(location.search);
+  const outcome = params.get('connect');
+  if (outcome === null) return;
+
+  const reason = params.get('reason');
+  const message =
+    outcome === 'ok'
+      ? null
+      : outcome === 'cancelled'
+        ? 'Connection cancelled.'
+        : `Could not connect that account${reason === null ? '' : ` (${reason.replace(/_/g, ' ')})`}.`;
+
+  if (message !== null) {
+    setError($('mastodon-error'), message);
+    $('connect-mastodon').open = true;
+  }
+  history.replaceState({}, '', location.pathname);
+}
+
 // --- composing --------------------------------------------------------------
 
 $('compose-body').addEventListener('input', () => {
@@ -356,6 +403,7 @@ async function start() {
     show($('app'), true);
 
     await renderConnectSteps();
+    reportConnectOutcome();
     await refresh();
   } catch (error) {
     if (error.status === 401) {
