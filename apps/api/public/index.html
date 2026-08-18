@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SMM</title>
+    <link rel="stylesheet" href="/style.css" />
+    <link rel="icon" href="data:," />
+  </head>
+  <body>
+    <noscript>This app needs JavaScript enabled.</noscript>
+
+    <!-- Only one of these is visible at a time; app.js decides which. -->
+    <main id="auth" hidden>
+      <div class="card">
+        <h1>SMM</h1>
+        <p class="muted">Schedule and publish across your social accounts.</p>
+
+        <div class="tabs" role="tablist">
+          <button id="tab-signin" class="tab" role="tab" aria-selected="true">Sign in</button>
+          <button id="tab-signup" class="tab" role="tab" aria-selected="false">Create account</button>
+        </div>
+
+        <form id="form-signin" autocomplete="on">
+          <label for="signin-email">Email</label>
+          <input id="signin-email" name="email" type="email" required autocomplete="username" />
+
+          <label for="signin-password">Password</label>
+          <input
+            id="signin-password"
+            name="password"
+            type="password"
+            required
+            autocomplete="current-password"
+          />
+
+          <button type="submit" class="primary">Sign in</button>
+        </form>
+
+        <form id="form-signup" hidden autocomplete="on">
+          <label for="signup-name">Your name</label>
+          <input id="signup-name" name="name" required autocomplete="name" />
+
+          <label for="signup-org">Company or brand</label>
+          <input id="signup-org" name="organizationName" required autocomplete="organization" />
+
+          <label for="signup-email">Email</label>
+          <input id="signup-email" name="email" type="email" required autocomplete="username" />
+
+          <label for="signup-password">Password</label>
+          <input
+            id="signup-password"
+            name="password"
+            type="password"
+            required
+            minlength="12"
+            autocomplete="new-password"
+          />
+          <p class="hint">At least 12 characters. Length matters more than symbols.</p>
+
+          <button type="submit" class="primary">Create account</button>
+        </form>
+
+        <p id="auth-error" class="error" role="alert" hidden></p>
+      </div>
+    </main>
+
+    <div id="app" hidden>
+      <header class="bar">
+        <strong>SMM</strong>
+        <span class="spacer"></span>
+        <span id="who" class="muted"></span>
+        <button id="signout" class="link">Sign out</button>
+      </header>
+
+      <div class="columns">
+        <section class="card">
+          <h2>Accounts</h2>
+          <ul id="profiles" class="list"></ul>
+          <p id="profiles-empty" class="muted" hidden>No accounts connected yet.</p>
+
+          <details id="connect">
+            <summary>Connect Bluesky</summary>
+            <div id="connect-steps" class="steps"></div>
+            <form id="form-connect">
+              <label for="connect-handle">Handle</label>
+              <input id="connect-handle" placeholder="yourname.bsky.social" required />
+
+              <label for="connect-password">App password</label>
+              <input id="connect-password" type="password" required autocomplete="off" />
+              <p class="hint">
+                An app password, not your account password. Create one in Bluesky under
+                Settings → App Passwords; you can revoke it there at any time.
+              </p>
+
+              <button type="submit" class="primary">Connect</button>
+            </form>
+            <p id="connect-error" class="error" role="alert" hidden></p>
+          </details>
+
+          <details id="connect-mastodon">
+            <summary>Connect Mastodon</summary>
+            <form id="form-mastodon">
+              <label for="mastodon-instance">Your server</label>
+              <input id="mastodon-instance" placeholder="mastodon.social" required />
+              <p class="hint">
+                The server your account lives on. You will be sent there to approve access
+                and returned here afterwards.
+              </p>
+              <button type="submit" class="primary">Continue to your server</button>
+            </form>
+            <p id="mastodon-error" class="error" role="alert" hidden></p>
+          </details>
+        </section>
+
+        <section class="card">
+          <h2>Compose</h2>
+          <form id="form-compose">
+            <label for="compose-body">Post</label>
+            <textarea id="compose-body" rows="5" required></textarea>
+            <p class="hint"><span id="counter">0</span> characters</p>
+
+            <details id="assist" hidden>
+              <summary>Write it for me</summary>
+              <label for="assist-brief">What should it be about?</label>
+              <input id="assist-brief" placeholder="our new checkout is 40% faster" />
+              <p class="hint">
+                Drafts are checked against this network's real length limit and your
+                brand's banned words before you see them, and ranked by how different
+                they are from what you have already posted.
+              </p>
+              <button id="assist-go" type="button" class="secondary">Draft some options</button>
+              <div id="assist-results" class="drafts"></div>
+              <p id="assist-error" class="error" role="alert" hidden></p>
+            </details>
+
+            <label for="compose-targets">Publish to</label>
+            <select id="compose-targets" multiple size="4" required></select>
+
+            <fieldset class="modes">
+              <legend>When</legend>
+              <label class="choice">
+                <input type="radio" name="when-mode" value="queue" checked />
+                Next free time in the queue
+              </label>
+              <label class="choice">
+                <input type="radio" name="when-mode" value="at" />
+                A time I pick
+              </label>
+              <label class="choice">
+                <input type="radio" name="when-mode" value="draft" />
+                Save as a draft — decide later
+              </label>
+            </fieldset>
+
+            <p id="compose-next" class="hint"></p>
+
+            <div id="compose-at" class="row" hidden>
+              <div>
+                <label for="compose-when">When (local time)</label>
+                <input id="compose-when" type="datetime-local" />
+              </div>
+              <div>
+                <label for="compose-tz">Timezone</label>
+                <select id="compose-tz"></select>
+              </div>
+            </div>
+
+            <button type="submit" class="primary">Schedule</button>
+          </form>
+          <p id="compose-error" class="error" role="alert" hidden></p>
+          <p id="compose-ok" class="ok" role="status" hidden></p>
+        </section>
+      </div>
+
+      <section class="card" id="queue-card" hidden>
+        <h2>Posting times</h2>
+        <p class="muted">
+          The queue publishes into these times in order, so adding a post is one decision
+          instead of one decision per post.
+        </p>
+
+        <div class="row">
+          <div>
+            <label for="queue-profile">Account</label>
+            <select id="queue-profile"></select>
+          </div>
+          <div class="align-end">
+            <button id="queue-pause" type="button" class="secondary">Pause queue</button>
+          </div>
+        </div>
+
+        <p id="queue-zone" class="hint"></p>
+
+        <div id="queue-week" class="week"></div>
+
+        <form id="form-slot" class="row">
+          <div>
+            <label for="slot-day">Day</label>
+            <select id="slot-day">
+              <option value="1">Monday</option>
+              <option value="2">Tuesday</option>
+              <option value="3">Wednesday</option>
+              <option value="4">Thursday</option>
+              <option value="5">Friday</option>
+              <option value="6">Saturday</option>
+              <option value="0">Sunday</option>
+            </select>
+          </div>
+          <div>
+            <label for="slot-time">Time</label>
+            <input id="slot-time" type="time" value="09:00" required />
+          </div>
+          <div class="align-end">
+            <button type="submit" class="secondary">Add time</button>
+          </div>
+        </form>
+
+        <p id="queue-error" class="error" role="alert" hidden></p>
+
+        <h3>Next up</h3>
+        <ul id="queue-upcoming" class="list"></ul>
+      </section>
+
+      <section class="card" id="analytics-card" hidden>
+        <h2>Performance</h2>
+        <p id="analytics-note" class="muted"></p>
+
+        <div id="analytics-totals" class="totals"></div>
+
+        <table id="analytics-table">
+          <thead>
+            <tr id="analytics-head">
+              <th>Post</th>
+              <th>Account</th>
+            </tr>
+          </thead>
+          <tbody id="analytics-rows"></tbody>
+        </table>
+        <p id="analytics-empty" class="muted" hidden>
+          Nothing published yet. Numbers appear here once a post goes out and the
+          platform has been asked about it.
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>Scheduled</h2>
+        <table id="posts-table">
+          <thead>
+            <tr>
+              <th>Post</th>
+              <th>Account</th>
+              <th>When</th>
+              <th>Status</th>
+              <th><span class="sr-only">Actions</span></th>
+            </tr>
+          </thead>
+          <tbody id="posts"></tbody>
+        </table>
+        <p id="posts-error" class="error" role="alert" hidden></p>
+        <p id="posts-empty" class="muted" hidden>Nothing scheduled yet.</p>
+      </section>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

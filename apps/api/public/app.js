@@ -1,0 +1,1007 @@
+/*
+ * Client for the SMM API.
+ *
+ * Plain modules, no framework and no build step. The whole surface is a handful
+ * of forms over a JSON API, and a toolchain would cost more to maintain than it
+ * saves. It also keeps the page compatible with the strict content security
+ * policy the server sets, which forbids inline script.
+ */
+
+const $ = (id) => document.getElementById(id);
+
+/** Bluesky's limit. Shown live so nobody discovers it after scheduling. */
+const BLUESKY_LIMIT = 300;
+
+/** Counts user-perceived characters, so an emoji is one and not two. */
+const segmenter =
+  typeof Intl !== 'undefined' && Intl.Segmenter
+    ? new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+    : null;
+
+function countCharacters(text) {
+  if (segmenter === null) return [...text].length;
+  let n = 0;
+  for (const _ of segmenter.segment(text)) n += 1;
+  return n;
+}
+
+async function api(path, options = {}) {
+  const response = await fetch(path, {
+    ...options,
+    headers: { 'content-type': 'application/json', ...(options.headers ?? {}) },
+    // The session is an HttpOnly cookie, so it has to be sent explicitly.
+    credentials: 'same-origin',
+  });
+
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(body.message ?? body.error ?? `Request failed (${response.status})`);
+    error.status = response.status;
+    error.payload = body;
+    throw error;
+  }
+  return body;
+}
+
+function show(element, visible) {
+  element.hidden = !visible;
+}
+
+function setError(element, message) {
+  element.textContent = message ?? '';
+  show(element, Boolean(message));
+}
+
+/**
+ * Submit handler that disables the button while in flight.
+ *
+ * Double submission on a slow connection is otherwise routine, and on the
+ * compose form that means two identical posts.
+ */
+function onSubmit(form, handler) {
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const button = form.querySelector('button[type=submit]');
+    const label = button?.textContent;
+    if (button) {
+      button.disabled = true;
+      button.textContent = 'Working…';
+    }
+    try {
+      await handler();
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.textContent = label;
+      }
+    }
+  });
+}
+
+// --- authentication ---------------------------------------------------------
+
+function selectTab(which) {
+  const signin = which === 'signin';
+  $('tab-signin').setAttribute('aria-selected', String(signin));
+  $('tab-signup').setAttribute('aria-selected', String(!signin));
+  show($('form-signin'), signin);
+  show($('form-signup'), !signin);
+  setError($('auth-error'), '');
+}
+
+$('tab-signin').addEventListener('click', () => selectTab('signin'));
+$('tab-signup').addEventListener('click', () => selectTab('signup'));
+
+onSubmit($('form-signin'), async () => {
+  setError($('auth-error'), '');
+  try {
+    await api('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({
+        email: $('signin-email').value,
+        password: $('signin-password').value,
+      }),
+    });
+    await start();
+  } catch (error) {
+    setError($('auth-error'), error.message);
+  }
+});
+
+onSubmit($('form-signup'), async () => {
+  setError($('auth-error'), '');
+  try {
+    await api('/api/auth/signup', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: $('signup-name').value,
+        organizationName: $('signup-org').value,
+        email: $('signup-email').value,
+        password: $('signup-password').value,
+        // Sending the browser's zone means the first brand is created in the
+        // user's own timezone rather than in UTC, which is almost never what
+        // they meant.
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      }),
+    });
+    await start();
+  } catch (error) {
+    setError($('auth-error'), error.message);
+  }
+});
+
+$('signout').addEventListener('click', async () => {
+  await api('/api/auth/logout', { method: 'POST' }).catch(() => {});
+  location.reload();
+});
+
+// --- connecting an account --------------------------------------------------
+
+/**
+ * Render whatever the adapter says it needs.
+ *
+ * The server returns either a redirect or a list of steps, so the shape of a
+ * network's connect flow lives in the adapter rather than here.
+ */
+async function renderConnectSteps() {
+  try {
+    const start = await api('/api/networks/bluesky/connect');
+    if (start.redirectUrl) {
+      $('connect-steps').innerHTML = '';
+      location.href = start.redirectUrl;
+      return;
+    }
+
+    const container = $('connect-steps');
+    container.innerHTML = '';
+    for (const step of start.instructions ?? []) {
+      if (step.kind !== 'external_action') continue;
+      const p = document.createElement('p');
+      p.textContent = `${step.detail} `;
+      if (step.url) {
+        const a = document.createElement('a');
+        a.href = step.url;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        a.textContent = 'Open Bluesky settings';
+        p.append(a);
+      }
+      container.append(p);
+    }
+  } catch {
+    // Not fatal: the form below still works without the preamble.
+  }
+}
+
+onSubmit($('form-connect'), async () => {
+  setError($('connect-error'), '');
+  try {
+    await api('/api/networks/bluesky/connect', {
+      method: 'POST',
+      body: JSON.stringify({
+        profileGroupId: state.profileGroupId,
+        // A pasted handle very often carries the @ from a profile page.
+        identifier: $('connect-handle').value.trim().replace(/^@/, ''),
+        appPassword: $('connect-password').value.trim(),
+      }),
+    });
+    $('connect-password').value = '';
+    $('connect').open = false;
+    await refresh();
+  } catch (error) {
+    setError($('connect-error'), error.message);
+  }
+});
+
+onSubmit($('form-mastodon'), async () => {
+  setError($('mastodon-error'), '');
+  try {
+    // The server decides where to send the user: it registers a client on that
+    // instance and mints the state that binds the callback to this workspace.
+    const start = await api(
+      `/api/networks/mastodon/connect?instance=${encodeURIComponent($('mastodon-instance').value)}` +
+        `&profileGroupId=${encodeURIComponent(state.profileGroupId ?? '')}`,
+    );
+    if (start.redirectUrl) {
+      location.href = start.redirectUrl;
+      return;
+    }
+    setError($('mastodon-error'), 'That server did not offer an authorisation page.');
+  } catch (error) {
+    setError($('mastodon-error'), error.message);
+  }
+});
+
+/**
+ * Report the outcome of a connect that happened via redirect.
+ *
+ * The callback cannot render a message itself — it has to send the browser
+ * somewhere — so the result travels back as a query parameter and is cleared
+ * from the URL once shown, to keep it out of history and out of any link the
+ * user later copies.
+ */
+function reportConnectOutcome() {
+  const params = new URLSearchParams(location.search);
+  const outcome = params.get('connect');
+  if (outcome === null) return;
+
+  const reason = params.get('reason');
+  const message =
+    outcome === 'ok'
+      ? null
+      : outcome === 'cancelled'
+        ? 'Connection cancelled.'
+        : `Could not connect that account${reason === null ? '' : ` (${reason.replace(/_/g, ' ')})`}.`;
+
+  if (message !== null) {
+    setError($('mastodon-error'), message);
+    $('connect-mastodon').open = true;
+  }
+  history.replaceState({}, '', location.pathname);
+}
+
+// --- composing --------------------------------------------------------------
+
+$('compose-body').addEventListener('input', () => {
+  const count = countCharacters($('compose-body').value);
+  const counter = $('counter');
+  counter.textContent = String(count);
+  counter.parentElement.classList.toggle('over-limit', count > BLUESKY_LIMIT);
+});
+
+function composeMode() {
+  return document.querySelector('input[name=when-mode]:checked')?.value ?? 'queue';
+}
+
+/**
+ * Show or hide the explicit time fields.
+ *
+ * `required` is toggled with them: a hidden required input blocks submission
+ * and the browser cannot focus it to explain why, which reads as a dead button.
+ */
+function applyComposeMode() {
+  const mode = composeMode();
+  const explicit = mode === 'at';
+  show($('compose-at'), explicit);
+  $('compose-when').required = explicit;
+  $('compose-next').textContent =
+    mode === 'draft' ? 'Saved without a time. Schedule it from the list below when you are ready.' : '';
+
+  const button = $('form-compose').querySelector('button[type=submit]');
+  if (button) button.textContent = mode === 'draft' ? 'Save draft' : 'Schedule';
+
+  if (mode === 'queue') void previewNextSlot();
+}
+
+for (const radio of document.querySelectorAll('input[name=when-mode]')) {
+  radio.addEventListener('change', applyComposeMode);
+}
+$('compose-targets').addEventListener('change', () => {
+  if (composeMode() === 'queue') void previewNextSlot();
+});
+
+/**
+ * Say when a queued post would actually go out.
+ *
+ * A queue that does not tell you this is a queue you do not trust, and the
+ * first thing people do without it is stop using the queue.
+ */
+async function previewNextSlot() {
+  const first = $('compose-targets').selectedOptions[0]?.value;
+  if (!first) {
+    $('compose-next').textContent = 'Choose an account to see when this would go out.';
+    return;
+  }
+  try {
+    const { schedule, upcoming } = await api(`/api/social-profiles/${first}/queue?limit=25`);
+    if (schedule.paused) {
+      $('compose-next').textContent = 'This queue is paused. Resume it below, or pick a time.';
+      return;
+    }
+    const next = upcoming.find((slot) => slot.free);
+    $('compose-next').textContent = next
+      ? `Goes out ${formatSlot(next.local)} (${schedule.timezone}).`
+      : 'No free time in this queue. Add more times below, or pick one.';
+  } catch {
+    // The compose form still works without the preview; a failed hint must not
+    // block posting.
+    $('compose-next').textContent = '';
+  }
+}
+
+onSubmit($('form-compose'), async () => {
+  setError($('compose-error'), '');
+  show($('compose-ok'), false);
+
+  const targets = [...$('compose-targets').selectedOptions].map((o) => o.value);
+  if (targets.length === 0) {
+    setError($('compose-error'), 'Choose at least one account.');
+    return;
+  }
+
+  const mode = composeMode();
+
+  try {
+    const result = await api('/api/posts', {
+      method: 'POST',
+      body: JSON.stringify({
+        profileGroupId: state.profileGroupId,
+        body: $('compose-body').value,
+        socialProfileIds: targets,
+        mode,
+        // Sent as a wall clock, never as an instant: the server records the
+        // zone alongside it so a timezone rule change stays correctable.
+        ...(mode === 'at'
+          ? {
+              scheduledLocal: $('compose-when').value.slice(0, 16),
+              timezone: $('compose-tz').value,
+            }
+          : {}),
+      }),
+    });
+
+    const target = result.targets[0];
+    if (target === undefined) {
+      // A draft: accounts chosen, no time. There is nothing to announce a
+      // moment for, and inventing one would be worse than saying so.
+      $('compose-ok').textContent = 'Saved as a draft.';
+    } else {
+      const when = new Date(target.scheduledAt);
+      const shifted =
+        target.resolution === 'shifted'
+          ? ' The time you picked does not exist that day — the clocks skip it — so it will go out at the first moment that does.'
+          : '';
+      $('compose-ok').textContent =
+        `${target.fromQueue ? 'Queued for' : 'Scheduled for'} ${when.toLocaleString()}.${shifted}`;
+    }
+    show($('compose-ok'), true);
+    $('compose-body').value = '';
+    $('counter').textContent = '0';
+    await refresh();
+    if (composeMode() === 'queue') await previewNextSlot();
+  } catch (error) {
+    setError($('compose-error'), error.message);
+  }
+});
+
+// --- drafting ----------------------------------------------------------------
+
+/**
+ * Ask for some options.
+ *
+ * The network comes from the first selected account rather than being asked
+ * for: a draft is only useful if it fits where it is going, and making someone
+ * state that twice is a question the page can already answer.
+ */
+$('assist-go').addEventListener('click', async () => {
+  const brief = $('assist-brief').value.trim();
+  if (brief === '') {
+    setError($('assist-error'), 'Say what the post should be about.');
+    return;
+  }
+
+  const selected = $('compose-targets').selectedOptions[0];
+  if (selected === undefined) {
+    setError($('assist-error'), 'Choose an account first, so the draft fits that network.');
+    return;
+  }
+  // The option label is "network — handle"; the network is what matters here.
+  const network = selected.textContent.split('—')[0].trim();
+
+  setError($('assist-error'), '');
+  const button = $('assist-go');
+  button.disabled = true;
+  button.textContent = 'Writing…';
+
+  try {
+    const result = await api('/api/assist/draft', {
+      method: 'POST',
+      body: JSON.stringify({
+        profileGroupId: state.profileGroupId,
+        brief,
+        network,
+        variants: 3,
+      }),
+    });
+    renderDrafts(result.drafts);
+  } catch (error) {
+    setError($('assist-error'), error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Draft some options';
+  }
+});
+
+function renderDrafts(drafts) {
+  const container = $('assist-results');
+  container.innerHTML = '';
+
+  for (const draft of drafts) {
+    const card = document.createElement('div');
+    card.className = 'draft';
+
+    const text = document.createElement('p');
+    text.textContent = draft.text;
+    card.append(text);
+
+    const meta = document.createElement('div');
+    meta.className = 'hint';
+    // The length is stated because it is the network's own count, not the one
+    // the reader would get from selecting the text — that difference is the
+    // whole reason this is checked here.
+    meta.textContent = `${draft.length} of ${draft.limit} characters`;
+
+    // Only mentioned when it is worth mentioning. An agency reposting an
+    // evergreen line on purpose is not making a mistake.
+    if (draft.novelty < 0.4 && draft.closestTo) {
+      const warn = document.createElement('div');
+      warn.className = 'hint warn';
+      const shown =
+        draft.closestTo.length > 70 ? `${draft.closestTo.slice(0, 70)}…` : draft.closestTo;
+      warn.textContent = `Close to something you already posted: “${shown}”`;
+      meta.append(warn);
+    }
+    card.append(meta);
+
+    const use = document.createElement('button');
+    use.type = 'button';
+    use.className = 'link';
+    use.textContent = 'Use this';
+    use.addEventListener('click', () => {
+      $('compose-body').value = draft.text;
+      $('compose-body').dispatchEvent(new Event('input'));
+      $('assist').open = false;
+    });
+    card.append(use);
+
+    container.append(card);
+  }
+}
+
+// --- posting times ----------------------------------------------------------
+
+const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+/** `2026-06-10T09:00` in the reader's own locale, without inventing a zone. */
+function formatSlot(local) {
+  const [date, time] = String(local).split('T');
+  const parts = (date ?? '').split('-').map(Number);
+  if (parts.length !== 3 || parts.some(Number.isNaN)) return String(local);
+  // Constructed as UTC and formatted as UTC, so the wall clock the server
+  // resolved is displayed unchanged rather than converted into the browser's
+  // zone — which would show the wrong time for an account in another country.
+  const at = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+  const day = at.toLocaleDateString(undefined, {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+    timeZone: 'UTC',
+  });
+  return `${day}, ${time ?? ''}`;
+}
+
+/** `HH:MM` from whatever the server stored, which includes seconds. */
+function shortTime(value) {
+  return String(value).slice(0, 5);
+}
+
+function renderWeek(slots) {
+  const container = $('queue-week');
+  container.innerHTML = '';
+
+  // Monday first. The week does not start on the same day everywhere, but a
+  // grid that puts Sunday first for a European team reads as a bug.
+  for (const day of [1, 2, 3, 4, 5, 6, 0]) {
+    const column = document.createElement('div');
+    column.className = 'day';
+
+    const heading = document.createElement('h4');
+    heading.textContent = DAY_NAMES[day].slice(0, 3);
+    column.append(heading);
+
+    const times = slots
+      .filter((slot) => slot.dayOfWeek === day)
+      .sort((a, b) => a.localTime.localeCompare(b.localTime));
+
+    if (times.length === 0) {
+      const none = document.createElement('span');
+      none.className = 'muted';
+      none.textContent = '—';
+      column.append(none);
+    }
+
+    for (const slot of times) {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'chip';
+      chip.textContent = shortTime(slot.localTime);
+      chip.title = `Remove ${shortTime(slot.localTime)} on ${DAY_NAMES[day]}`;
+      chip.setAttribute('aria-label', chip.title);
+      chip.addEventListener('click', () => removeSlot(slot));
+      column.append(chip);
+    }
+
+    container.append(column);
+  }
+}
+
+function renderUpcoming(upcoming) {
+  const list = $('queue-upcoming');
+  list.innerHTML = '';
+
+  if (upcoming.length === 0) {
+    const li = document.createElement('li');
+    li.className = 'muted';
+    li.textContent = 'No times set, so nothing is coming up.';
+    list.append(li);
+    return;
+  }
+
+  for (const slot of upcoming.slice(0, 10)) {
+    const li = document.createElement('li');
+    const when = document.createElement('span');
+    when.textContent = formatSlot(slot.local);
+    li.append(when);
+
+    const badge = document.createElement('span');
+    badge.className = `badge ${slot.free ? 'scheduled' : 'published'}`;
+    badge.textContent = slot.free ? 'open' : 'taken';
+    li.append(badge);
+
+    // Worth saying out loud: this is the twice-a-year case people notice.
+    if (slot.resolution === 'shifted') {
+      const note = document.createElement('span');
+      note.className = 'hint';
+      note.textContent = 'moved — the clocks skip this time';
+      li.append(note);
+    }
+    list.append(li);
+  }
+}
+
+async function loadQueue() {
+  const profileId = $('queue-profile').value;
+  if (!profileId) return;
+  setError($('queue-error'), '');
+
+  try {
+    const { schedule, upcoming } = await api(`/api/social-profiles/${profileId}/queue?limit=25`);
+    state.queue = schedule;
+    $('queue-zone').textContent = `Times are in ${schedule.timezone}, this account's timezone.`;
+    $('queue-pause').textContent = schedule.paused ? 'Resume queue' : 'Pause queue';
+    renderWeek(schedule.slots);
+    renderUpcoming(upcoming);
+  } catch (error) {
+    setError($('queue-error'), error.message);
+  }
+}
+
+/** Send the whole week. The editor is a grid, so a diff would only add risk. */
+async function saveWeek(slots) {
+  const profileId = $('queue-profile').value;
+  setError($('queue-error'), '');
+  try {
+    await api(`/api/social-profiles/${profileId}/queue/slots`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        slots: slots.map((slot) => ({
+          dayOfWeek: slot.dayOfWeek,
+          localTime: shortTime(slot.localTime),
+          categoryId: slot.categoryId ?? null,
+          acceptsFormats: slot.acceptsFormats ?? [],
+        })),
+      }),
+    });
+    await loadQueue();
+    if (composeMode() === 'queue') await previewNextSlot();
+  } catch (error) {
+    setError($('queue-error'), error.message);
+  }
+}
+
+function removeSlot(slot) {
+  const remaining = (state.queue?.slots ?? []).filter((s) => s.id !== slot.id);
+  void saveWeek(remaining);
+}
+
+onSubmit($('form-slot'), async () => {
+  const day = Number($('slot-day').value);
+  const time = $('slot-time').value;
+  const existing = state.queue?.slots ?? [];
+
+  if (existing.some((s) => s.dayOfWeek === day && shortTime(s.localTime) === time)) {
+    setError($('queue-error'), `${DAY_NAMES[day]} already has a post at ${time}.`);
+    return;
+  }
+  await saveWeek([...existing, { dayOfWeek: day, localTime: time }]);
+});
+
+$('queue-profile').addEventListener('change', loadQueue);
+
+$('queue-pause').addEventListener('click', async () => {
+  const profileId = $('queue-profile').value;
+  if (!profileId) return;
+  const paused = !state.queue?.paused;
+  setError($('queue-error'), '');
+  try {
+    await api(`/api/social-profiles/${profileId}/queue/pause`, {
+      method: 'POST',
+      body: JSON.stringify({ paused }),
+    });
+    await loadQueue();
+  } catch (error) {
+    setError($('queue-error'), error.message);
+  }
+});
+
+// --- state ------------------------------------------------------------------
+
+const state = { profileGroupId: null, queue: null };
+
+function renderProfiles(profiles) {
+  const list = $('profiles');
+  const select = $('compose-targets');
+  const queueSelect = $('queue-profile');
+  const previous = queueSelect.value;
+  list.innerHTML = '';
+  select.innerHTML = '';
+  queueSelect.innerHTML = '';
+
+  show($('profiles-empty'), profiles.length === 0);
+  // A queue editor with no accounts to edit is a dead control.
+  show($('queue-card'), profiles.length > 0);
+
+  for (const profile of profiles) {
+    const li = document.createElement('li');
+    const name = document.createElement('span');
+    name.textContent = profile.handle ?? profile.display_name;
+    li.append(name);
+
+    if (profile.status !== 'active') {
+      const badge = document.createElement('span');
+      badge.className = 'badge failed';
+      badge.textContent = profile.status.replace(/_/g, ' ');
+      li.append(badge);
+    }
+    list.append(li);
+
+    const label = `${profile.network} — ${profile.handle ?? profile.display_name}`;
+
+    const option = document.createElement('option');
+    option.value = profile.id;
+    option.textContent = label;
+    select.append(option);
+
+    const queueOption = document.createElement('option');
+    queueOption.value = profile.id;
+    queueOption.textContent = label;
+    // Keeps the editor on the account being edited across a refresh, rather
+    // than jumping back to the first one mid-edit.
+    queueOption.selected = profile.id === previous;
+    queueSelect.append(queueOption);
+  }
+}
+
+function renderPosts(posts) {
+  const body = $('posts');
+  body.innerHTML = '';
+  show($('posts-empty'), posts.length === 0);
+  show($('posts-table'), posts.length > 0);
+
+  for (const post of posts) {
+    const row = document.createElement('tr');
+
+    const text = document.createElement('td');
+    text.textContent = post.body.length > 80 ? `${post.body.slice(0, 80)}…` : post.body;
+    row.append(text);
+
+    const network = document.createElement('td');
+    network.textContent = post.network;
+    row.append(network);
+
+    const when = document.createElement('td');
+    // The local wall clock and its zone are shown rather than a converted
+    // instant, because that is what the user actually chose.
+    when.textContent = post.scheduled_local
+      ? `${String(post.scheduled_local).replace('T', ' ').slice(0, 16)} ${post.scheduled_timezone ?? ''}`
+      : '—';
+    if (post.from_queue) {
+      const tag = document.createElement('div');
+      tag.className = 'hint';
+      tag.textContent = 'from the queue';
+      when.append(tag);
+    }
+    row.append(when);
+
+    const status = document.createElement('td');
+    // A failure that will be retried is not a failure the user has to act on,
+    // and labelling it "failed" sends them to fix something already in hand.
+    const retrying = post.target_status === 'failed' && post.next_attempt_at !== null;
+    const badge = document.createElement('span');
+    badge.className = `badge ${retrying ? 'scheduled' : post.target_status}`;
+    badge.textContent = retrying ? 'retrying' : post.target_status.replace(/_/g, ' ');
+    status.append(badge);
+
+    if (post.remote_url) {
+      const link = document.createElement('a');
+      link.href = post.remote_url;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.textContent = ' view';
+      status.append(link);
+    }
+    // A failure the user can act on is worth more than a red dot.
+    if (post.failure_message) {
+      const why = document.createElement('div');
+      why.className = 'hint';
+      why.textContent = retrying
+        ? `${post.failure_message} Trying again ${new Date(post.next_attempt_at).toLocaleTimeString()}.`
+        : post.failure_message;
+      status.append(why);
+    }
+    row.append(status);
+    row.append(actionsFor(post));
+    body.append(row);
+  }
+}
+
+/**
+ * What can still be done to this post.
+ *
+ * Derived from the target's state rather than always shown: offering "cancel"
+ * on something already published is an invitation to click a button that
+ * cannot do what it says.
+ */
+function actionsFor(post) {
+  const cell = document.createElement('td');
+  const stoppable = ['pending', 'scheduled', 'failed', 'awaiting_reconnect'];
+  if (!stoppable.includes(post.target_status)) return cell;
+
+  const undated = post.target_status === 'pending' && post.scheduled_local === null;
+
+  const when = document.createElement('button');
+  when.type = 'button';
+  when.className = 'link';
+  when.textContent = undated ? 'Schedule' : 'Reschedule';
+  when.addEventListener('click', () => scheduleExisting(post));
+  cell.append(when);
+
+  const stop = document.createElement('button');
+  stop.type = 'button';
+  stop.className = 'link danger';
+  stop.textContent = undated ? 'Delete' : 'Cancel';
+  stop.addEventListener('click', () => stopPost(post, undated));
+  cell.append(stop);
+
+  return cell;
+}
+
+async function stopPost(post, isDraft) {
+  const verb = isDraft ? 'Delete this draft?' : 'Cancel this post so it does not go out?';
+  if (!confirm(verb)) return;
+
+  setError($('posts-error'), '');
+  try {
+    // Deleting hides a draft nobody has seen; cancelling stops a post but
+    // keeps it in the list, because "what happened to that post" is a question
+    // people ask afterwards.
+    const result = isDraft
+      ? await api(`/api/posts/${post.id}`, { method: 'DELETE' })
+      : await api(`/api/posts/${post.id}/cancel`, { method: 'POST', body: '{}' });
+
+    // Reported rather than assumed: a copy already being published cannot be
+    // recalled, and the person who just clicked cancel needs to know that
+    // before they see it appear.
+    if (result.inFlight > 0) {
+      setError(
+        $('posts-error'),
+        `${result.inFlight} copy was already being published and may still appear. It will not be attempted again.`,
+      );
+    }
+    await refresh();
+  } catch (error) {
+    setError($('posts-error'), error.message);
+  }
+}
+
+async function scheduleExisting(post) {
+  const suggestion = post.scheduled_local
+    ? String(post.scheduled_local).replace(' ', 'T').slice(0, 16)
+    : '';
+  const answer = prompt(
+    'New time as YYYY-MM-DDTHH:MM in the account’s timezone.\n' +
+      'Leave empty to use the next free time in the queue.',
+    suggestion,
+  );
+  // Cancelled the dialog. An empty string is a real answer — "use the queue" —
+  // so only null means "never mind".
+  if (answer === null) return;
+
+  setError($('posts-error'), '');
+  try {
+    const trimmed = answer.trim();
+    await api(`/api/posts/${post.id}/schedule`, {
+      method: 'POST',
+      body: JSON.stringify(
+        trimmed === ''
+          ? { mode: 'queue' }
+          : {
+              mode: 'at',
+              scheduledLocal: trimmed,
+              timezone: post.scheduled_timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
+            },
+      ),
+    });
+    await refresh();
+    if (composeMode() === 'queue') await previewNextSlot();
+  } catch (error) {
+    setError($('posts-error'), error.message);
+  }
+}
+
+function fillTimezones() {
+  const select = $('compose-tz');
+  const local = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const zones =
+    typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : [local];
+
+  for (const zone of zones) {
+    const option = document.createElement('option');
+    option.value = zone;
+    option.textContent = zone;
+    option.selected = zone === local;
+    select.append(option);
+  }
+}
+
+// --- performance -------------------------------------------------------------
+
+/** Plural forms that are not just the word plus an s. */
+const METRIC_LABELS = { likes: 'Likes', comments: 'Comments', shares: 'Shares', quotes: 'Quotes' };
+
+function renderAnalytics(summary) {
+  const card = $('analytics-card');
+  show(card, summary.publishedCount > 0);
+  if (summary.publishedCount === 0) return;
+
+  const head = $('analytics-head');
+  const rows = $('analytics-rows');
+  head.innerHTML = '';
+  rows.innerHTML = '';
+
+  for (const label of ['Post', 'Account']) {
+    const th = document.createElement('th');
+    th.textContent = label;
+    head.append(th);
+  }
+  // Only columns something actually reported. A column of dashes reads as
+  // "zero" and there is no honest zero for a number nobody published.
+  for (const column of summary.columns) {
+    const th = document.createElement('th');
+    th.textContent = METRIC_LABELS[column] ?? column;
+    head.append(th);
+  }
+
+  const totals = $('analytics-totals');
+  totals.innerHTML = '';
+  for (const column of summary.columns) {
+    const tile = document.createElement('div');
+    tile.className = 'tile';
+
+    const value = document.createElement('strong');
+    value.textContent = String(summary.totals[column] ?? 0);
+    tile.append(value);
+
+    const label = document.createElement('span');
+    label.textContent = METRIC_LABELS[column] ?? column;
+    tile.append(label);
+    totals.append(tile);
+  }
+
+  const notes = [`${summary.publishedCount} published in the last 30 days.`];
+  if (summary.unmeasuredNetworks.length > 0) {
+    // Said out loud, because a blank row otherwise reads as a post that failed
+    // rather than a network that reports nothing.
+    notes.push(
+      `${summary.unmeasuredNetworks.join(' and ')} publishes no metrics to third parties, so those rows stay empty.`,
+    );
+  }
+  $('analytics-note').textContent = notes.join(' ');
+
+  // Best first: the question people open this for is which post worked.
+  const ranked = [...summary.posts].sort((a, b) => b.engagement - a.engagement);
+
+  for (const post of ranked) {
+    const row = document.createElement('tr');
+
+    const text = document.createElement('td');
+    if (post.remoteUrl) {
+      const link = document.createElement('a');
+      link.href = post.remoteUrl;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.textContent = post.body.length > 60 ? `${post.body.slice(0, 60)}…` : post.body;
+      text.append(link);
+    } else {
+      text.textContent = post.body.length > 60 ? `${post.body.slice(0, 60)}…` : post.body;
+    }
+    if (post.measuredAt) {
+      const when = document.createElement('div');
+      when.className = 'hint';
+      when.textContent = `Read ${new Date(post.measuredAt).toLocaleString()}`;
+      text.append(when);
+    }
+    row.append(text);
+
+    const account = document.createElement('td');
+    account.textContent = post.handle ?? post.network;
+    row.append(account);
+
+    for (const column of summary.columns) {
+      const cell = document.createElement('td');
+      const value = post.metrics[column];
+      // An em dash, not a zero: the platform said nothing about this one.
+      cell.textContent = value === undefined ? '—' : String(value);
+      cell.className = 'number';
+      row.append(cell);
+    }
+
+    rows.append(row);
+  }
+}
+
+async function refresh() {
+  const [{ socialProfiles }, { posts }, analytics] = await Promise.all([
+    api('/api/social-profiles'),
+    api('/api/posts'),
+    // Never fatal: the rest of the page is more important than the numbers.
+    api('/api/analytics').catch(() => ({ publishedCount: 0, posts: [], columns: [], totals: {}, unmeasuredNetworks: [] })),
+  ]);
+  renderProfiles(socialProfiles);
+  renderPosts(posts);
+  renderAnalytics(analytics);
+  if (socialProfiles.length > 0) await loadQueue();
+}
+
+async function start() {
+  try {
+    const me = await api('/api/me');
+    const { profileGroups } = await api('/api/profile-groups');
+    state.profileGroupId = profileGroups[0]?.id ?? null;
+
+    $('who').textContent = me.user.email;
+    show($('auth'), false);
+    show($('app'), true);
+
+    await renderConnectSteps();
+    reportConnectOutcome();
+    await refresh();
+    applyComposeMode();
+
+    // Hidden rather than shown-and-broken when no model is configured. A panel
+    // that only ever answers "not available" is worse than no panel.
+    const assist = await api('/api/assist/status').catch(() => ({ available: false }));
+    show($('assist'), assist.available);
+  } catch (error) {
+    if (error.status === 401) {
+      show($('app'), false);
+      show($('auth'), true);
+      selectTab('signin');
+      return;
+    }
+    throw error;
+  }
+}
+
+fillTimezones();
+// Default the schedule field to an hour out, rounded to the next five minutes.
+{
+  const when = new Date(Date.now() + 3_600_000);
+  when.setMinutes(Math.ceil(when.getMinutes() / 5) * 5, 0, 0);
+  const pad = (n) => String(n).padStart(2, '0');
+  $('compose-when').value =
+    `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())}` +
+    `T${pad(when.getHours())}:${pad(when.getMinutes())}`;
+}
+
+start();

@@ -18,6 +18,8 @@ import type { PublishingLimits } from '@smm/adapters';
 export type BudgetReason =
   /** The rolling 24-hour post cap for this account is used up. */
   | 'daily_cap_reached'
+  /** Our own configured cap, which is stricter than the platform's. */
+  | 'safety_cap_reached'
   /** Posts to this account must be spaced further apart. */
   | 'min_interval'
   /** The per-minute request ceiling is reached. */
@@ -60,10 +62,24 @@ function within(times: readonly Date[], now: Date, windowMs: number): Date[] {
  * the returned `retryAfterMs` is the wait for the nearest binding constraint
  * rather than the furthest.
  */
+export interface BudgetOptions {
+  /**
+   * A stricter self-imposed daily cap for this account.
+   *
+   * Publishing right up to a platform's stated ceiling is a good way to be
+   * classified as spam, so a margin is prudent. It belongs to the tenant rather
+   * than the descriptor: the right margin for a news desk posting hourly is not
+   * the right margin for a dentist, and a competitor's fixed, unchangeable cap
+   * is a documented source of customer frustration.
+   */
+  readonly safetyCapPer24h?: number | undefined;
+}
+
 export function checkPublishBudget(
   now: Date,
   history: AccountHistory,
   limits: PublishingLimits,
+  options: BudgetOptions = {},
 ): BudgetDecision {
   if (limits.newAccountWarmupDays !== undefined && history.connectedAt !== undefined) {
     const postableFrom = history.connectedAt.getTime() + limits.newAccountWarmupDays * DAY_MS;
@@ -106,17 +122,31 @@ export function checkPublishBudget(
     }
   }
 
-  if (limits.maxPostsPer24h !== undefined) {
+  // The binding cap is whichever is stricter: the platform's, or ours.
+  const platformCap = limits.maxPostsPer24h;
+  const safetyCap = options.safetyCapPer24h;
+  const effectiveCap =
+    platformCap === undefined
+      ? safetyCap
+      : safetyCap === undefined
+        ? platformCap
+        : Math.min(platformCap, safetyCap);
+
+  if (effectiveCap !== undefined) {
     const recent = within(history.publishes, now, DAY_MS);
-    if (recent.length >= limits.maxPostsPer24h) {
+    if (recent.length >= effectiveCap) {
       const oldest = recent[0];
       const retryAfterMs =
         oldest === undefined ? DAY_MS : oldest.getTime() + DAY_MS - now.getTime();
+      const isOurs = safetyCap !== undefined && effectiveCap === safetyCap
+        && (platformCap === undefined || safetyCap < platformCap);
       return {
         allowed: false,
-        reason: 'daily_cap_reached',
+        reason: isOurs ? 'safety_cap_reached' : 'daily_cap_reached',
         retryAfterMs: Math.max(1, retryAfterMs),
-        message: `This account has used its ${limits.maxPostsPer24h} posts for the last 24 hours. The next slot frees up shortly.`,
+        message: isOurs
+          ? `This account has hit your ${effectiveCap} posts per day limit. You can raise it in the account's settings.`
+          : `This account has used its ${effectiveCap} posts for the last 24 hours. The next slot frees up shortly.`,
       };
     }
   }
@@ -134,23 +164,46 @@ export function remainingDailyBudget(
   now: Date,
   history: AccountHistory,
   limits: PublishingLimits,
+  options: BudgetOptions = {},
 ): number | null {
-  if (limits.maxPostsPer24h === undefined) return null;
+  const caps = [limits.maxPostsPer24h, options.safetyCapPer24h].filter(
+    (c): c is number => c !== undefined,
+  );
+  if (caps.length === 0) return null;
   const used = within(history.publishes, now, DAY_MS).length;
-  return Math.max(0, limits.maxPostsPer24h - used);
+  return Math.max(0, Math.min(...caps) - used);
 }
 
 /**
- * Marginal cost in USD of publishing one post.
+ * Indicative cost in USD of publishing one post.
  *
  * X is currently the only major network charging per write, and it charges
- * substantially more when the post contains a link. Surfacing the number lets
- * the scheduler reason about spend, and lets us price a plan that includes X
- * without losing money on it.
+ * substantially more when the post contains a link. This figure is for display
+ * and forecasting — showing a user what a scheduled burst will cost. It may be
+ * based on an unconfirmed number, so it must not reach an invoice. Use
+ * `billableCostUsd` for anything that charges someone.
  */
 export function estimatePostCostUsd(limits: PublishingLimits, containsLink: boolean): number {
   if (containsLink && limits.costPerPostWithLinkUsd !== undefined) {
     return limits.costPerPostWithLinkUsd;
   }
   return limits.costPerPostUsd ?? 0;
+}
+
+/**
+ * Cost in USD that may be charged to a customer, or null if we do not know.
+ *
+ * Returns null unless the figure is marked `verified`. Billing a customer from
+ * a number we inferred from a changelog is not a rounding error, it is an
+ * incorrect invoice, and the correct behaviour when the input is uncertain is
+ * to refuse rather than to guess. Callers must handle null by declining to
+ * bill and raising the gap for a human, not by falling back to zero.
+ */
+export function billableCostUsd(limits: PublishingLimits, containsLink: boolean): number | null {
+  if (limits.costPerPostUsd === undefined && limits.costPerPostWithLinkUsd === undefined) {
+    // The network does not charge for writes at all; zero is a fact.
+    return 0;
+  }
+  if (limits.costConfidence !== 'verified') return null;
+  return estimatePostCostUsd(limits, containsLink);
 }

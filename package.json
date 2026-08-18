@@ -15,11 +15,19 @@
     "build": "npm run build --workspaces --if-present",
     "typecheck": "tsc --build",
     "typecheck:clean": "tsc --build --clean",
-    "test": "tsc --build && node --test $(find packages -path '*/dist/*' -name '*.test.js')",
+    "test": "tsc --build && node --test --test-concurrency=1 $(find packages apps -path '*/dist/*' -name '*.test.js')",
     "lint": "npm run lint --workspaces --if-present"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
     "typescript": "^5.7.2"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.1.2",
+    "@fastify/helmet": "^13.1.0",
+    "@fastify/rate-limit": "^10.3.0",
+    "@fastify/static": "^8.3.0",
+    "fastify": "^5.11.3",
+    "zod": "^3.25.76"
   }
 }

@@ -254,10 +254,18 @@ export const X: PlatformCapabilities = {
   sources: ['https://docs.x.com/x-api', 'research/06-platform-apis-tier1.md'],
   publishing: {
     rejectsDuplicateContent: true,
-    // X is the only major network that charges per write. Surfacing the cost
-    // here lets the scheduler reason about spend, not just rate limits.
+    // X is the only major network that charges per write, which makes the
+    // figure load-bearing for both scheduling and pricing.
+    //
+    // UNVERIFIED, and flagged as the single highest-consequence unconfirmed
+    // fact in the research: at 100k link-posts a month the difference between
+    // these numbers and the real ones is roughly $20k of monthly cost. They are
+    // recorded so the scheduler can warn about spend, and marked so billing
+    // refuses to read them until someone confirms them against the developer
+    // portal.
     costPerPostUsd: 0.015,
     costPerPostWithLinkUsd: 0.2,
+    costConfidence: 'unverified',
   },
   read: {
     comments: true,
@@ -579,6 +587,70 @@ export const GOOGLE_BUSINESS: PlatformCapabilities = {
   ],
 };
 
+/**
+ * Mastodon, and the wider fediverse.
+ *
+ * The one descriptor here that is only a starting point rather than the truth.
+ * Every limit below is set per instance: `max_toot_chars` is commonly 500 but
+ * routinely 1,000 or 5,000, attachment counts and poll options vary, and some
+ * instances disable features outright. The adapter overrides these from
+ * `/api/v1/instance` for a given connection, which is precisely why
+ * `capabilities()` takes one.
+ *
+ * Treat these as the conservative defaults used before an instance has been
+ * asked, not as facts about the network.
+ */
+export const MASTODON: PlatformCapabilities = {
+  network: 'mastodon',
+  verifiedOn: '2026-08-12',
+  sources: ['https://docs.joinmastodon.org/methods/statuses/', 'research/07-platform-apis-tier2.md'],
+  publishing: { rejectsDuplicateContent: false },
+  read: {
+    comments: true,
+    directMessages: true,
+    analytics: false,
+    // Instance-local search only, and full-text search is opt-in per instance.
+    keywordSearch: true,
+    webhooks: false,
+    deletePost: true,
+    editPost: true,
+    maxDataRetentionDays: null,
+  },
+  formats: [
+    {
+      format: 'text',
+      delivery: 'auto',
+      text: { maxLength: 500, counting: { kind: 'grapheme' }, required: true, linksClickable: true },
+      media: { minCount: 0, maxCount: 0, mixedTypesAllowed: false },
+      features: ['link_in_body', 'poll', 'reply_controls'],
+    },
+    {
+      format: 'image',
+      delivery: 'auto',
+      text: { maxLength: 500, counting: { kind: 'grapheme' }, required: false, linksClickable: true },
+      media: {
+        minCount: 1,
+        maxCount: 4,
+        mixedTypesAllowed: false,
+        image: { ...FEED_IMAGE, maxBytes: 16 * MB, minAspectRatio: 0.01, maxAspectRatio: 10, mimeTypes: JPEG_PNG_WEBP },
+      },
+      features: ['alt_text', 'link_in_body', 'reply_controls'],
+    },
+    {
+      format: 'video',
+      delivery: 'auto',
+      text: { maxLength: 500, counting: { kind: 'grapheme' }, required: false, linksClickable: true },
+      media: {
+        minCount: 1,
+        maxCount: 1,
+        mixedTypesAllowed: false,
+        video: { ...VERTICAL_VIDEO, maxBytes: 99 * MB, minAspectRatio: 0.01, maxAspectRatio: 10 },
+      },
+      features: ['alt_text', 'link_in_body', 'reply_controls'],
+    },
+  ],
+};
+
 const REGISTRY = new Map<NetworkId, PlatformCapabilities>([
   ['instagram', INSTAGRAM],
   ['facebook', FACEBOOK],
@@ -589,6 +661,7 @@ const REGISTRY = new Map<NetworkId, PlatformCapabilities>([
   ['youtube', YOUTUBE],
   ['pinterest', PINTEREST],
   ['bluesky', BLUESKY],
+  ['mastodon', MASTODON],
   ['google_business', GOOGLE_BUSINESS],
 ]);
 

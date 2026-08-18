@@ -5,10 +5,28 @@
       "path": "./packages/shared"
     },
     {
+      "path": "./packages/vault"
+    },
+    {
+      "path": "./packages/db"
+    },
+    {
       "path": "./packages/adapters"
     },
     {
+      "path": "./packages/credentials"
+    },
+    {
+      "path": "./packages/assistant"
+    },
+    {
       "path": "./packages/scheduler"
+    },
+    {
+      "path": "./apps/api"
+    },
+    {
+      "path": "./apps/worker"
     }
   ]
 }

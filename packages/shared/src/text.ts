@@ -175,7 +175,26 @@ export function truncateToLimit(
     out += segment;
     used += cost;
   }
-  return out + ellipsis;
+
+  // The loop above charges each grapheme on its own, which is exact only when
+  // cost is additive. Under X's rules it is not: a URL collapses to a fixed
+  // width however long it is, so cutting through the middle of one leaves a
+  // shorter string that measures MORE than the budget the loop thought it was
+  // spending — the truncated fragment still matches as a link and is charged
+  // the full fixed width. The appended ellipsis can be absorbed into that match
+  // too, spending the room reserved for it.
+  //
+  // Rather than special-case URLs, re-measure the actual candidate and shrink
+  // until it genuinely fits. Without this the "shorten it for me" button hands
+  // back a string that fails the very check that offered it.
+  let candidate = out + ellipsis;
+  while (out.length > 0 && measureText(candidate, strategy) > limit) {
+    const graphemes = toGraphemes(out);
+    graphemes.pop();
+    out = graphemes.join('');
+    candidate = out + ellipsis;
+  }
+  return candidate;
 }
 
 /**
@@ -218,4 +237,180 @@ export function extractHashtags(text: string): string[] {
   return [...text.matchAll(/(?:^|[^\p{L}\p{N}_#])#([\p{L}\p{M}\p{N}_]{1,140})/gu)]
     .map((m) => m[1])
     .filter((h): h is string => h !== undefined);
+}
+
+/*
+ * Near-duplicate detection.
+ *
+ * X and Facebook reject posts that are close enough to something the account
+ * has already published, and neither publishes the rule they use. A scheduling
+ * tool whose entire value proposition includes recycling evergreen content will
+ * walk into that rule constantly: the same testimonial reposted quarterly, the
+ * same product blurb with a rotated hashtag block, a queue refilled from a
+ * library of fifty posts.
+ *
+ * Hitting it at publish time is expensive. The post is already scheduled, the
+ * slot is already gone, and the failure arrives as a platform error code hours
+ * later with nobody watching. Scoring similarity locally, in the composer,
+ * turns that into a warning next to a body the user is already editing — the
+ * cheapest possible moment to fix it.
+ *
+ * The score is a prediction, not a verdict. We do not know the platforms'
+ * thresholds and they change them, so this is tuned to be useful rather than
+ * exact, and it must never block a publish on its own.
+ */
+
+/**
+ * Sequences that carry no meaning for duplicate comparison.
+ *
+ * Emoji are stripped along with punctuation because swapping one emoji for
+ * another is the most common way a recycled post is "changed" before reposting,
+ * and platforms are not fooled by it either.
+ */
+const EMOJI_PATTERN =
+  /[\p{Extended_Pictographic}\p{Emoji_Presentation}\u{1f3fb}-\u{1f3ff}\u{fe0f}\u{200d}\u{20e3}]/gu;
+
+/** Hashtags and @mentions, including the leading sigil. */
+const TAG_PATTERN = /[@#][\p{L}\p{M}\p{N}_.-]+/gu;
+
+/** Punctuation, symbols, and invisible formatting characters. */
+const NOISE_PATTERN = /[\p{P}\p{S}\p{C}]/gu;
+
+/**
+ * Reduce text to the form used for similarity comparison.
+ *
+ * Everything removed here is something a platform's duplicate check is known
+ * or strongly believed to look past, or something that varies between two
+ * copies of what a reader would call the same post:
+ *
+ *  - URLs, because link shorteners and UTM parameters make every repost of the
+ *    same content textually distinct while changing nothing a reader sees.
+ *  - Hashtags and mentions, because rotating the tag block is the standard
+ *    workaround people try, and it does not work on the platforms either.
+ *  - Case, punctuation, emoji and whitespace runs, because they are the
+ *    difference between two drafts of the same sentence.
+ *
+ * NFKC here, unlike the content hash, which uses NFC. For comparison we want
+ * fullwidth and halfwidth Latin, ligatures and styled letters to fold together:
+ * a post retyped with fullwidth characters is the same post to a reader and to
+ * a duplicate filter. For hashing we deliberately do not, because those forms
+ * look different when published and an approval covers what was seen.
+ *
+ * Lowercasing is locale-independent by choice. `toLocaleLowerCase` under a
+ * Turkish locale maps I differently, which would make two users get different
+ * similarity scores for identical text.
+ */
+export function normalizeForComparison(text: string): string {
+  URL_PATTERN.lastIndex = 0;
+  return text
+    .normalize('NFKC')
+    .replace(URL_PATTERN, ' ')
+    .replace(TAG_PATTERN, ' ')
+    .toLowerCase()
+    .replace(EMOJI_PATTERN, ' ')
+    .replace(NOISE_PATTERN, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim();
+}
+
+/** Trigrams are the usual compromise: long enough to be specific, short enough to survive edits. */
+const SHINGLE_SIZE = 3;
+
+/**
+ * Distinct grapheme trigrams of already-normalised text.
+ *
+ * Graphemes, not UTF-16 units, for the same reason the counting code uses them:
+ * slicing a surrogate pair or a ZWJ sequence produces trigrams that correspond
+ * to nothing, and for CJK — where three characters is roughly a phrase rather
+ * than three letters — a code-unit window would straddle characters and make
+ * the score meaningless on exactly the languages where duplicate detection
+ * matters most.
+ *
+ * The single space left by normalisation is kept inside the window so that word
+ * boundaries are part of the signal.
+ */
+function trigrams(normalized: string): ReadonlySet<string> {
+  const graphemes = toGraphemes(normalized);
+  const out = new Set<string>();
+  for (let i = 0; i + SHINGLE_SIZE <= graphemes.length; i += 1) {
+    out.add(graphemes.slice(i, i + SHINGLE_SIZE).join(''));
+  }
+  return out;
+}
+
+/**
+ * How alike two bodies are, from 0 (nothing in common) to 1 (identical after
+ * normalisation).
+ *
+ * Jaccard rather than Dice. Both rank pairs in the same order, so the choice
+ * does not change which posts get flagged once a threshold is calibrated; what
+ * it changes is the number shown to the user. Dice counts the intersection
+ * twice, so two posts sharing half their trigrams read as 67% similar, whereas
+ * Jaccard reports the 50% that people actually mean by "how much overlaps".
+ * Since this figure appears in the composer as plain overlap, the measure that
+ * matches the plain reading is the right one.
+ *
+ * Texts shorter than one trigram have no shingles at all, so they fall back to
+ * exact comparison of the normalised form. Returning 0 for them instead would
+ * miss the case of two identical one-word posts, which platforms do reject.
+ */
+export function similarity(a: string, b: string): number {
+  const left = normalizeForComparison(a);
+  const right = normalizeForComparison(b);
+
+  // Normalisation strips URLs, hashtags, mentions and emoji, so a link-drop or
+  // a hashtag-only post reduces to nothing. Two such posts are then equal as
+  // empty strings and would score a perfect match despite sharing no content —
+  // two entirely different product links reported as identical.
+  //
+  // With no prose to compare, fall back to the raw text: identical bodies are
+  // still duplicates, different ones are not. Guessing similarity from an empty
+  // signal is how a warning gets trained out of a team.
+  if (left === '' && right === '') return a === b ? 1 : 0;
+
+  if (left === right) return 1;
+
+  const leftGrams = trigrams(left);
+  const rightGrams = trigrams(right);
+  if (leftGrams.size === 0 || rightGrams.size === 0) return 0;
+
+  // Walk the smaller set: membership tests are constant time, so the cost is
+  // set by whichever side we iterate.
+  const leftIsSmaller = leftGrams.size <= rightGrams.size;
+  const smaller = leftIsSmaller ? leftGrams : rightGrams;
+  const larger = leftIsSmaller ? rightGrams : leftGrams;
+
+  let intersection = 0;
+  for (const gram of smaller) {
+    if (larger.has(gram)) intersection += 1;
+  }
+
+  const union = leftGrams.size + rightGrams.size - intersection;
+  return union === 0 ? 0 : intersection / union;
+}
+
+/**
+ * Default warning threshold.
+ *
+ * Set from the observed behaviour of X and Facebook rather than from theory,
+ * and set low enough to be worth a warning rather than high enough to be
+ * certain. Being wrong in the cautious direction costs a dismissible notice;
+ * being wrong the other way costs a missed posting slot.
+ */
+export const NEAR_DUPLICATE_THRESHOLD = 0.85;
+
+/**
+ * Whether two bodies are close enough that a platform is likely to refuse the
+ * second one.
+ *
+ * A predicate rather than a rule: callers warn on it, and must not block on it.
+ * A tool that refuses to publish something the platform would have accepted is
+ * worse than one that lets a duplicate through.
+ */
+export function isNearDuplicate(
+  a: string,
+  b: string,
+  threshold = NEAR_DUPLICATE_THRESHOLD,
+): boolean {
+  return similarity(a, b) >= threshold;
 }

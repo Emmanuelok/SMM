@@ -1,54 +1,163 @@
-# SMM — Global AI Social Media Management Platform
+# SMM
 
-An AI-native platform for creating, scheduling, publishing, and managing social media
-presence across every network that matters — worldwide.
+A social media management platform: schedule, publish, engage and measure across
+many networks.
 
-The goal is full functional parity with [Vista Social](https://vistasocial.com), then a
-decisive step beyond it: genuinely global network coverage (including the regional
-platforms Western tools ignore), an agentic AI layer that owns outcomes rather than
-tasks, and measurement that closes the loop from post to revenue.
+## State
 
-## Status
+Early, but end to end. You can sign up, connect a Bluesky or Mastodon account,
+set a weekly posting queue, draft a post (by hand or with a model), add it to
+the queue, change your mind, and the worker will pick it up, publish it, and
+read its numbers back.
 
-**Pre-implementation.** The repository currently holds foundations and an in-progress
-research corpus. No product code has been written yet — architecture decisions are
-deliberately being made *after* the research lands, not before.
-
-| Phase | State |
+| | |
 |---|---|
-| Market + technical research | In progress |
-| Scope & architecture sign-off | Pending |
-| Platform foundations | Not started |
-| Product modules | Not started |
+| **Works** | Web UI, signup, login, sessions, connecting Bluesky and Mastodon accounts, composing, drafts, posting queues, scheduling, cancelling and rescheduling, the publish worker, metrics collection and performance reporting, brand voice and AI drafting |
+| **Built, not wired** | Approvals, content recycling, media renditions, the rights ledger |
+| **Not started** | Networks beyond Bluesky and Mastodon, media storage, email, billing |
 
-## Repository layout
+Two networks. Every other one parks its posts with a clear reason rather than
+failing obscurely, because they require an approved developer application first
+and those take weeks — see `research/06-platform-apis-tier1.md`. Bluesky and
+Mastodon need none, which is why they came first.
+
+The live network calls are the one thing never executed in development: the
+sandbox this was built in blocks both hosts. Everything either side of them is
+covered — including the database, against a real Postgres — so the first real
+connection is also the first real test.
+
+## Layout
 
 ```
-research/    Market, competitive, platform-API, compliance and GTM research.
-             Written by a multi-agent research pass; the master synthesis is
-             00-MASTER-STRATEGY.md.
+apps/api          HTTP service and web client: auth, connections, composing, analytics
+apps/worker       Publish dispatcher and metrics collector
+packages/shared   Ids, Result, failure taxonomy, text measurement
+packages/vault    Credential encryption, password hashing, tokens
+packages/db       Connection pool, migration runner, SQL migrations
+packages/adapters Network capabilities, validation, the adapter contract
+packages/scheduler Timezone resolution, posting queues, publish budgets, retry policy
+packages/assistant Brand voice, the model seam, network-checked drafting
+research/         Market and platform research the design is drawn from
 ```
 
-Further directories are added once the architecture is agreed.
+## Running locally
 
-## Why the research comes first
+Needs Node 22 and Postgres 16.
 
-Two constraints dominate this product and both are external:
+```sh
+npm install
+cp .env.example .env      # then set DATABASE_URL and CREDENTIAL_KEYS
+npm run build
+node packages/db/dist/cli.js up
+node apps/api/dist/main.js
+```
 
-1. **Platform API access is the real bottleneck.** Meta Tech Provider status, X API
-   pricing tiers, the TikTok Content Posting API, and the LinkedIn Marketing Developer
-   Platform all gate production access behind review processes measured in weeks to
-   months — and several prohibit capabilities users assume exist. Some networks cannot
-   be auto-published to at all, which forces a reminder-based fallback path that has to
-   be designed in, not bolted on.
+Generate a credential key with:
 
-2. **Platform terms constrain the data model.** Several networks cap how long their data
-   may be cached, which directly shapes what the analytics architecture can store and
-   for how long.
+```sh
+node -e "console.log('k1:' + require('crypto').randomBytes(32).toString('base64'))"
+```
 
-Designing around these from day one is cheaper than discovering them after building.
+```sh
+npm test          # builds, then runs every test
+npm run typecheck
+```
 
-## Contributing
+`npm test` is hermetic: the tests that need a database skip themselves. Point
+`TEST_DATABASE_URL` at a scratch database to include them, and they will apply
+the migrations and exercise the real schema:
 
-Development happens on feature branches. See `research/` for the strategy and
-architecture rationale behind any given module.
+```sh
+createdb smm_test
+DATABASE_URL=postgres://localhost/smm_test DATABASE_SSL=false node packages/db/dist/cli.js
+TEST_DATABASE_URL=postgres://localhost/smm_test npm test
+```
+
+Each of those tests creates and deletes its own tenant, so the database it runs
+against is not left dirty — but point it at a scratch one anyway. Test files run
+one at a time (`--test-concurrency=1`), because the dispatcher claims work
+across the whole database by design and a suite running beside it would be
+competing for the same rows.
+
+Deployment is documented in [DEPLOYMENT.md](DEPLOYMENT.md).
+
+## Design decisions worth knowing before reading the code
+
+**Capabilities are data, not code.** Every network expresses the same handful of
+constraints — text length, media counts, codecs, daily caps — so the validator is
+written once and each network supplies its numbers. The same descriptors drive
+the composer and the pre-publish check, so what the editor allows and what the
+API accepts cannot drift apart.
+
+**Delivery mode depends on content, not format.** A plain Instagram Story
+publishes through the API; the same Story with a link sticker cannot, because
+Meta exposes no sticker API. Since Stories are Instagram's most-used format and
+stickers are their entire engagement mechanic, reminder-based publishing is a
+primary path rather than an edge case.
+
+**Text measurement is its own module.** A naive length check is wrong three
+ways: emoji are several UTF-16 units but one character to a user, X weights CJK
+and emoji as two, and X rewrites every URL to a fixed width so link length is
+irrelevant.
+
+**Scheduling stores intent, not just the resulting instant.** Timezone rules
+change several times a year; keeping only the computed moment makes the
+resulting drift undetectable and uncorrectable.
+
+**A queue is a weekly grid of wall-clock times, resolved per occurrence.**
+Producing next week's slot by adding 604,800,000 milliseconds is the shortcut
+that makes a queue drift an hour away from the week its owner set up, twice a
+year, without anyone noticing — the posts still go out. Two consequences fall
+out of resolving properly and are handled rather than left to the caller: two
+slots can collapse onto one instant across a spring-forward gap, and a slot on a
+fall-back day happens twice.
+
+**The queue's race is closed by the database.** "Find a free slot, then take it"
+is a read followed by a write, and two people adding to the same queue at the
+same moment both see the same free slot. A partial unique index refuses the
+second one; the application retries rather than failing, because by then the
+next slot really is free. The index covers only queue-placed rows, so two posts
+deliberately pinned to the same minute stay legal.
+
+**Metrics carry provenance from the first row.** Platform retention windows are
+short — Pinterest 90 days, X 30, TikTok around 60 — so uncaptured data is
+unrecoverable, and provenance added later leaves the back catalogue
+unattributable. Adapters return the platform's own field name, endpoint and API
+version, and all three are stored beside the value; the mapping into a
+cross-network vocabulary happens on the way *out*. That is what turns a platform
+redefining a metric into a dated annotation on a chart rather than an
+unexplainable cliff in a number a client has seen every month for two years.
+
+**Readings are appended, never updated, and a cumulative counter is never
+summed.** Platforms restate figures for days afterwards, so overwriting
+yesterday's reading destroys the evidence that the platform changed its mind.
+And Bluesky's `likeCount` is a running total on the record — adding thirty daily
+readings gives a number thirty times too large that still looks entirely
+plausible on a chart. A metric no platform published is absent rather than zero,
+because a zero in an impressions column reads as "nobody saw it" instead of "we
+were never told".
+
+**A generated caption is checked, not hoped for.** A model asked for "under 300
+characters" returns something that is 300 by its own reckoning and 340 by X's,
+because X counts CJK and emoji as two and rewrites every URL to a fixed 23. So
+every candidate is measured with the same function the composer and the
+pre-publish check use, and one that does not fit is dropped rather than shipped.
+Banned terms are enforced on the output too: a model told not to say a word says
+it anyway often enough that treating the instruction as the control would be
+negligent, and that field is where a compliance constraint lives.
+
+**Brand voice is per brand, not per workspace.** The customer this is built for
+is an agency with twelve clients, and a voice defined at the workspace level
+means "write like whichever client we described last". The first time a law
+firm's post reads like a skateboard brand's is the last time that agency uses
+the feature.
+
+**Migrations are the schema contract.** No ORM: model definitions would be a
+second description of the same thing, free to drift from the first.
+
+## Research
+
+`research/` holds 19 dossiers and three synthesis documents. Start with
+`00-MASTER-STRATEGY.md`. `00-critique.md` is a deliberate audit of what the
+research missed or asserted without evidence, and `00-UPGRADE-SPEC.md` audits
+this codebase against the findings.

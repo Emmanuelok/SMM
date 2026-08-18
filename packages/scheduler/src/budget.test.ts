@@ -4,7 +4,12 @@ import { test } from 'node:test';
 import type { PublishingLimits } from '@smm/adapters';
 import { failure } from '@smm/shared';
 
-import { checkPublishBudget, estimatePostCostUsd, remainingDailyBudget } from './budget.js';
+import {
+  billableCostUsd,
+  checkPublishBudget,
+  estimatePostCostUsd,
+  remainingDailyBudget,
+} from './budget.js';
 import { DEFAULT_ATTEMPT_POLICY, planNextAttempt } from './retry.js';
 
 const NOW = new Date('2026-06-15T12:00:00Z');
@@ -97,6 +102,61 @@ test('reports remaining daily budget for the composer', () => {
     remainingDailyBudget(NOW, { publishes: [], requests: [] }, { rejectsDuplicateContent: false }),
     null,
   );
+});
+
+test('a stricter self-imposed cap binds before the platform cap', () => {
+  const publishes = Array.from({ length: 10 }, (_, i) => ago((i + 1) * 30 * MINUTE));
+  const decision = checkPublishBudget(
+    NOW,
+    { publishes, requests: [] },
+    TIKTOK_LIMITS, // platform allows 15
+    { safetyCapPer24h: 10 },
+  );
+
+  assert.ok(!decision.allowed);
+  assert.equal(decision.reason, 'safety_cap_reached');
+  // The message must point at the setting, since the user can change this one.
+  assert.match(decision.message, /settings/i);
+});
+
+test('the platform cap still binds when it is the stricter of the two', () => {
+  const publishes = Array.from({ length: 15 }, (_, i) => ago((i + 1) * 30 * MINUTE));
+  const decision = checkPublishBudget(
+    NOW,
+    { publishes, requests: [] },
+    TIKTOK_LIMITS,
+    { safetyCapPer24h: 50 },
+  );
+  assert.ok(!decision.allowed);
+  assert.equal(decision.reason, 'daily_cap_reached');
+});
+
+test('remaining budget reflects whichever cap is stricter', () => {
+  const publishes = Array.from({ length: 4 }, (_, i) => ago((i + 1) * HOUR));
+  assert.equal(
+    remainingDailyBudget(NOW, { publishes, requests: [] }, TIKTOK_LIMITS, { safetyCapPer24h: 10 }),
+    6,
+  );
+});
+
+test('billing refuses a cost figure we have not confirmed', () => {
+  // X's per-post pricing is the highest-consequence unverified number in the
+  // research. Charging a customer from it would be an incorrect invoice.
+  const unverified: PublishingLimits = {
+    rejectsDuplicateContent: true,
+    costPerPostUsd: 0.015,
+    costPerPostWithLinkUsd: 0.2,
+    costConfidence: 'unverified',
+  };
+  assert.equal(billableCostUsd(unverified, false), null);
+  // It is still shown to the user as an estimate.
+  assert.equal(estimatePostCostUsd(unverified, false), 0.015);
+
+  const verified: PublishingLimits = { ...unverified, costConfidence: 'verified' };
+  assert.equal(billableCostUsd(verified, true), 0.2);
+
+  // A network that charges nothing is a fact, not a guess.
+  assert.equal(billableCostUsd(TIKTOK_LIMITS, true), 0);
 });
 
 test('prices a post, including the surcharge for links', () => {
