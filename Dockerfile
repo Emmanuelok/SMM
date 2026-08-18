@@ -11,22 +11,23 @@ FROM node:22-slim AS build
 
 WORKDIR /app
 
-# Manifests first, so a dependency install is only redone when a manifest
-# changes rather than on every source edit.
-COPY package.json package-lock.json ./
-COPY packages/shared/package.json    packages/shared/
-COPY packages/vault/package.json     packages/vault/
-COPY packages/db/package.json        packages/db/
-COPY packages/adapters/package.json  packages/adapters/
-COPY packages/scheduler/package.json packages/scheduler/
-COPY apps/api/package.json           apps/api/
-COPY apps/worker/package.json        apps/worker/
-
-RUN npm ci --no-audit --no-fund
-
-COPY tsconfig.base.json tsconfig.json ./
+# Everything, then install.
+#
+# This deliberately does NOT hand-list each workspace's package.json to get a
+# cacheable dependency layer. That list has to be edited every time a package is
+# added, and when it is forgotten the build does not fail — npm still creates
+# the workspace symlink from the lockfile, so the tree looks right and only a
+# missing *external* dependency of the forgotten package shows up, much later
+# and much less clearly. A build that is correct by construction beats one that
+# is thirty seconds faster and silently wrong.
+COPY package.json package-lock.json tsconfig.base.json tsconfig.json ./
 COPY packages/ packages/
 COPY apps/ apps/
+
+# The cache mount is what pays for the above: npm's download cache survives
+# across builds even when this layer is invalidated by a source edit, so a
+# rebuild re-links rather than re-downloads.
+RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
 
 RUN npx tsc --build
 
