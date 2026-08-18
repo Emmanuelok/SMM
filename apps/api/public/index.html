@@ -120,6 +120,20 @@
             <textarea id="compose-body" rows="5" required></textarea>
             <p class="hint"><span id="counter">0</span> characters</p>
 
+            <details id="assist" hidden>
+              <summary>Write it for me</summary>
+              <label for="assist-brief">What should it be about?</label>
+              <input id="assist-brief" placeholder="our new checkout is 40% faster" />
+              <p class="hint">
+                Drafts are checked against this network's real length limit and your
+                brand's banned words before you see them, and ranked by how different
+                they are from what you have already posted.
+              </p>
+              <button id="assist-go" type="button" class="secondary">Draft some options</button>
+              <div id="assist-results" class="drafts"></div>
+              <p id="assist-error" class="error" role="alert" hidden></p>
+            </details>
+
             <label for="compose-targets">Publish to</label>
             <select id="compose-targets" multiple size="4" required></select>
 

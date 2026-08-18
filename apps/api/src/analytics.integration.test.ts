@@ -250,6 +250,29 @@ describe('analytics, against Postgres', { skip: url === undefined ? 'TEST_DATABA
     }
   });
 
+  test('a fractional limit does not reach Postgres', async () => {
+    await fixture();
+    try {
+      const targetId = await published('A post');
+      await reading(targetId, 'likeCount', 5, new Date());
+
+      // `LIMIT 1.5` is a type error in Postgres, and clamping the *range*
+      // alone let it through because 1.5 is within bounds. It arrived as a 500
+      // on `GET /api/analytics?limit=1.5`.
+      const summary = await postPerformance(sql, organizationId, { limit: 1.5, sinceDays: 7.9 });
+      assert.equal(summary.publishedCount, 1);
+
+      // And nonsense falls back rather than throwing.
+      const nonsense = await postPerformance(sql, organizationId, {
+        limit: Number.NaN,
+        sinceDays: Number.POSITIVE_INFINITY,
+      });
+      assert.equal(nonsense.publishedCount, 1);
+    } finally {
+      await cleanup();
+    }
+  });
+
   test('an unpublished post has no performance to report', async () => {
     await fixture();
     try {

@@ -84,13 +84,27 @@ const PUBLISHES_NO_METRICS = new Set(['mastodon']);
  * available for showing that a platform restated a figure, while the default
  * view shows only what is currently true.
  */
+/**
+ * A whole number inside a range, whatever arrived.
+ *
+ * Truncation is the part that matters, not the clamping: `LIMIT 1.5` is a type
+ * error in Postgres, so a query string of `?limit=1.5` reached the driver and
+ * came back as a 500. Clamping the range alone let it through, because 1.5 is
+ * perfectly within bounds.
+ */
+function boundedInt(value: number | undefined, fallback: number, min: number, max: number): number {
+  const whole = Math.trunc(Number(value));
+  if (!Number.isFinite(whole)) return fallback;
+  return Math.min(Math.max(whole, min), max);
+}
+
 export async function postPerformance(
   sql: Sql,
   organizationId: OrganizationId,
   options: { readonly sinceDays?: number; readonly limit?: number } = {},
 ): Promise<AnalyticsSummary> {
-  const sinceDays = Math.min(Math.max(options.sinceDays ?? 30, 1), 365);
-  const limit = Math.min(Math.max(options.limit ?? 50, 1), 200);
+  const sinceDays = boundedInt(options.sinceDays, 30, 1, 365);
+  const limit = boundedInt(options.limit, 50, 1, 200);
   const since = new Date(Date.now() - sinceDays * 86_400_000);
 
   const targets = await sql<

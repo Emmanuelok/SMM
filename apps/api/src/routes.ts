@@ -1,4 +1,5 @@
 import { BlueskyAdapter, MastodonAdapter, isAuthRedirect, normalizeInstance } from '@smm/adapters';
+import type { AssistantProvider } from '@smm/assistant';
 import { CredentialVault, blueskyCredentials, mastodonCredentials } from '@smm/credentials';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
@@ -10,6 +11,7 @@ import type { Vault } from '@smm/vault';
 import type { AuthenticatedUser } from './auth.js';
 import { OAuthStateStore, saveConnection } from './oauth.js';
 import { postPerformance, readingHistory } from './analytics.js';
+import { assistDraft, getBrandVoice, setBrandVoice } from './assist.js';
 import { cancelPost, deletePost, reschedulePost } from './posts.js';
 import { schedulePost, type RequestedTiming, type Timing } from './publishing.js';
 import { ensureSchedule, previewQueue, replaceSlots, setPaused } from './queues.js';
@@ -109,11 +111,37 @@ const pauseSchema = z.object({
   reason: z.string().max(200).optional(),
 });
 
+const assistSchema = z.object({
+  profileGroupId: z.string().uuid(),
+  brief: z.string().min(3).max(2_000),
+  network: z.string().min(1).max(40),
+  // Capped low deliberately: more options past a handful is a worse decision,
+  // not a better one, and every extra variant is output tokens.
+  variants: z.coerce.number().int().min(1).max(5).default(3),
+});
+
+const voiceSchema = z.object({
+  description: z.string().max(2_000).optional(),
+  formality: z.enum(['casual', 'conversational', 'professional', 'formal']).optional(),
+  traits: z.array(z.string().max(40)).max(12).optional(),
+  bannedTerms: z.array(z.string().max(80)).max(200).optional(),
+  emoji: z.enum(['none', 'sparing', 'liberal']).optional(),
+  samples: z.array(z.string().max(2_000)).max(10).optional(),
+});
+
 export interface RouteDeps {
   readonly sql: Sql;
   readonly vault: Vault;
   /** Public origin, used to build the OAuth redirect a network must return to. */
   readonly publicUrl: string;
+  /**
+   * The writing model, when one is configured.
+   *
+   * Optional on purpose. A deployment with no model key schedules and publishes
+   * perfectly; only this one panel is off, and it says so rather than looking
+   * broken.
+   */
+  readonly assistant?: AssistantProvider | undefined;
   readonly requireUser: (
     request: FastifyRequest,
     reply: FastifyReply,
@@ -526,6 +554,95 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     if (!updated) return reply.code(404).send({ error: 'unknown_profile' });
 
     return reply.send({ paused: parsed.data.paused });
+  });
+
+  /**
+   * Draft some posts.
+   *
+   * Rate limited harder than the rest of the API: this is the one route that
+   * costs real money per call, and an unbounded one is somebody else's bill.
+   */
+  app.post(
+    '/api/assist/draft',
+    { config: { rateLimit: { max: 30, timeWindow: '5 minutes' } } },
+    async (request, reply) => {
+      const user = await requireUser(request, reply);
+      if (user === undefined) return reply;
+
+      const parsed = assistSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: 'invalid_request', issues: parsed.error.issues });
+      }
+
+      const result = await assistDraft(
+        sql,
+        user.organizationId as OrganizationId,
+        {
+          profileGroupId: parsed.data.profileGroupId,
+          brief: parsed.data.brief,
+          network: parsed.data.network as Parameters<typeof assistDraft>[2]['network'],
+          variants: parsed.data.variants,
+        },
+        deps.assistant,
+      );
+
+      if (!result.ok) {
+        // Not configured is a deployment fact rather than a bad request, and
+        // 501 is what lets the UI hide the panel instead of showing an error.
+        const code =
+          result.reason === 'unknown_profile_group'
+            ? 404
+            : result.reason === 'not_configured'
+              ? 501
+              : result.reason === 'provider_failed'
+                ? 502
+                : 400;
+        return reply.code(code).send({ error: result.reason, message: result.message });
+      }
+      return reply.send(result);
+    },
+  );
+
+  /** Whether the assistant is available at all, so the UI can hide the panel. */
+  app.get('/api/assist/status', async (request, reply) => {
+    const user = await requireUser(request, reply);
+    if (user === undefined) return reply;
+    return reply.send({ available: deps.assistant !== undefined });
+  });
+
+  app.get('/api/profile-groups/:id/voice', async (request, reply) => {
+    const user = await requireUser(request, reply);
+    if (user === undefined) return reply;
+
+    const { id } = request.params as { id: string };
+    if (!UUID.test(id)) return reply.code(404).send({ error: 'unknown_profile_group' });
+
+    const voice = await getBrandVoice(sql, user.organizationId as OrganizationId, id);
+    if (voice === undefined) return reply.code(404).send({ error: 'unknown_profile_group' });
+    return reply.send({ voice });
+  });
+
+  app.put('/api/profile-groups/:id/voice', async (request, reply) => {
+    const user = await requireUser(request, reply);
+    if (user === undefined) return reply;
+
+    const { id } = request.params as { id: string };
+    if (!UUID.test(id)) return reply.code(404).send({ error: 'unknown_profile_group' });
+
+    const parsed = voiceSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'invalid_request', issues: parsed.error.issues });
+    }
+
+    const updated = await setBrandVoice(
+      sql,
+      user.organizationId as OrganizationId,
+      id,
+      parsed.data,
+    );
+    if (!updated) return reply.code(404).send({ error: 'unknown_profile_group' });
+
+    return reply.send({ voice: await getBrandVoice(sql, user.organizationId as OrganizationId, id) });
   });
 
   /**

@@ -169,7 +169,7 @@ export async function recordReadings(
           ${target.organizationId}, ${target.socialProfileId}, ${target.targetId},
           ${metric.fieldAsReturned}, ${metric.value}, ${measuredAt}, ${metric.collectedAt},
           ${metric.endpoint}, ${metric.fieldAsReturned}, ${metric.apiVersion},
-          ${JSON.stringify({ value: metric.value, measureKind: metric.measureKind })}
+          ${sql.json({ value: metric.value, measureKind: metric.measureKind })}
         )
         ON CONFLICT DO NOTHING
         RETURNING id

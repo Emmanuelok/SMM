@@ -18,6 +18,7 @@ import { describedNetworks, capabilitiesFor } from '@smm/adapters';
 import { EnvKeyProvider, Vault } from '@smm/vault';
 
 import { allowInsecureCookies, type Config } from './config.js';
+import { providerFromEnv } from '@smm/assistant';
 import { registerRoutes } from './routes.js';
 import {
   SESSION_COOKIE,
@@ -361,7 +362,22 @@ export async function buildServer(options: BuildOptions): Promise<FastifyInstanc
 
   // Connecting accounts and composing posts live in their own module; they need
   // `requireUser`, so they are registered once it exists.
-  registerRoutes(app, { sql, vault, requireUser, publicUrl: config.PUBLIC_URL });
+  //
+  // The writing model is read from the environment and may be absent. That is a
+  // supported deployment rather than a misconfiguration: everything except the
+  // draft panel works without it, and the panel says so instead of erroring.
+  const assistant = providerFromEnv();
+  if (assistant !== undefined) {
+    app.log.info({ model: assistant.name }, 'writing assistant enabled');
+  }
+
+  registerRoutes(app, {
+    sql,
+    vault,
+    requireUser,
+    publicUrl: config.PUBLIC_URL,
+    ...(assistant === undefined ? {} : { assistant }),
+  });
 
   // --- errors ---------------------------------------------------------------
 

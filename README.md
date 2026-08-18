@@ -6,12 +6,13 @@ many networks.
 ## State
 
 Early, but end to end. You can sign up, connect a Bluesky or Mastodon account,
-set a weekly posting queue, add a post to it, and the worker will pick it up and
-publish it.
+set a weekly posting queue, draft a post (by hand or with a model), add it to
+the queue, change your mind, and the worker will pick it up, publish it, and
+read its numbers back.
 
 | | |
 |---|---|
-| **Works** | Web UI, signup, login, sessions, connecting Bluesky and Mastodon accounts, composing, drafts, posting queues, scheduling, cancelling and rescheduling, the publish worker, metrics collection and performance reporting |
+| **Works** | Web UI, signup, login, sessions, connecting Bluesky and Mastodon accounts, composing, drafts, posting queues, scheduling, cancelling and rescheduling, the publish worker, metrics collection and performance reporting, brand voice and AI drafting |
 | **Built, not wired** | Approvals, content recycling, media renditions, the rights ledger |
 | **Not started** | Networks beyond Bluesky and Mastodon, media storage, email, billing |
 
@@ -28,13 +29,14 @@ connection is also the first real test.
 ## Layout
 
 ```
-apps/api          HTTP service and web client: auth, connections, composing
-apps/worker       Publish dispatcher
+apps/api          HTTP service and web client: auth, connections, composing, analytics
+apps/worker       Publish dispatcher and metrics collector
 packages/shared   Ids, Result, failure taxonomy, text measurement
 packages/vault    Credential encryption, password hashing, tokens
 packages/db       Connection pool, migration runner, SQL migrations
 packages/adapters Network capabilities, validation, the adapter contract
-packages/scheduler Timezone resolution, publish budgets, retry policy
+packages/scheduler Timezone resolution, posting queues, publish budgets, retry policy
+packages/assistant Brand voice, the model seam, network-checked drafting
 research/         Market and platform research the design is drawn from
 ```
 
@@ -134,6 +136,21 @@ readings gives a number thirty times too large that still looks entirely
 plausible on a chart. A metric no platform published is absent rather than zero,
 because a zero in an impressions column reads as "nobody saw it" instead of "we
 were never told".
+
+**A generated caption is checked, not hoped for.** A model asked for "under 300
+characters" returns something that is 300 by its own reckoning and 340 by X's,
+because X counts CJK and emoji as two and rewrites every URL to a fixed 23. So
+every candidate is measured with the same function the composer and the
+pre-publish check use, and one that does not fit is dropped rather than shipped.
+Banned terms are enforced on the output too: a model told not to say a word says
+it anyway often enough that treating the instruction as the control would be
+negligent, and that field is where a compliance constraint lives.
+
+**Brand voice is per brand, not per workspace.** The customer this is built for
+is an agency with twelve clients, and a voice defined at the workspace level
+means "write like whichever client we described last". The first time a law
+firm's post reads like a skateboard brand's is the last time that agency uses
+the feature.
 
 **Migrations are the schema contract.** No ORM: model definitions would be a
 second description of the same thing, free to drift from the first.

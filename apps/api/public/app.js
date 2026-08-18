@@ -364,6 +364,100 @@ onSubmit($('form-compose'), async () => {
   }
 });
 
+// --- drafting ----------------------------------------------------------------
+
+/**
+ * Ask for some options.
+ *
+ * The network comes from the first selected account rather than being asked
+ * for: a draft is only useful if it fits where it is going, and making someone
+ * state that twice is a question the page can already answer.
+ */
+$('assist-go').addEventListener('click', async () => {
+  const brief = $('assist-brief').value.trim();
+  if (brief === '') {
+    setError($('assist-error'), 'Say what the post should be about.');
+    return;
+  }
+
+  const selected = $('compose-targets').selectedOptions[0];
+  if (selected === undefined) {
+    setError($('assist-error'), 'Choose an account first, so the draft fits that network.');
+    return;
+  }
+  // The option label is "network — handle"; the network is what matters here.
+  const network = selected.textContent.split('—')[0].trim();
+
+  setError($('assist-error'), '');
+  const button = $('assist-go');
+  button.disabled = true;
+  button.textContent = 'Writing…';
+
+  try {
+    const result = await api('/api/assist/draft', {
+      method: 'POST',
+      body: JSON.stringify({
+        profileGroupId: state.profileGroupId,
+        brief,
+        network,
+        variants: 3,
+      }),
+    });
+    renderDrafts(result.drafts);
+  } catch (error) {
+    setError($('assist-error'), error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Draft some options';
+  }
+});
+
+function renderDrafts(drafts) {
+  const container = $('assist-results');
+  container.innerHTML = '';
+
+  for (const draft of drafts) {
+    const card = document.createElement('div');
+    card.className = 'draft';
+
+    const text = document.createElement('p');
+    text.textContent = draft.text;
+    card.append(text);
+
+    const meta = document.createElement('div');
+    meta.className = 'hint';
+    // The length is stated because it is the network's own count, not the one
+    // the reader would get from selecting the text — that difference is the
+    // whole reason this is checked here.
+    meta.textContent = `${draft.length} of ${draft.limit} characters`;
+
+    // Only mentioned when it is worth mentioning. An agency reposting an
+    // evergreen line on purpose is not making a mistake.
+    if (draft.novelty < 0.4 && draft.closestTo) {
+      const warn = document.createElement('div');
+      warn.className = 'hint warn';
+      const shown =
+        draft.closestTo.length > 70 ? `${draft.closestTo.slice(0, 70)}…` : draft.closestTo;
+      warn.textContent = `Close to something you already posted: “${shown}”`;
+      meta.append(warn);
+    }
+    card.append(meta);
+
+    const use = document.createElement('button');
+    use.type = 'button';
+    use.className = 'link';
+    use.textContent = 'Use this';
+    use.addEventListener('click', () => {
+      $('compose-body').value = draft.text;
+      $('compose-body').dispatchEvent(new Event('input'));
+      $('assist').open = false;
+    });
+    card.append(use);
+
+    container.append(card);
+  }
+}
+
 // --- posting times ----------------------------------------------------------
 
 const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -883,6 +977,11 @@ async function start() {
     reportConnectOutcome();
     await refresh();
     applyComposeMode();
+
+    // Hidden rather than shown-and-broken when no model is configured. A panel
+    // that only ever answers "not available" is worse than no panel.
+    const assist = await api('/api/assist/status').catch(() => ({ available: false }));
+    show($('assist'), assist.available);
   } catch (error) {
     if (error.status === 401) {
       show($('app'), false);

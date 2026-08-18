@@ -17,6 +17,9 @@
       "path": "./packages/credentials"
     },
     {
+      "path": "./packages/assistant"
+    },
+    {
       "path": "./packages/scheduler"
     },
     {
