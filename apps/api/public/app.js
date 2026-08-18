@@ -260,11 +260,17 @@ function composeMode() {
  * and the browser cannot focus it to explain why, which reads as a dead button.
  */
 function applyComposeMode() {
-  const explicit = composeMode() === 'at';
+  const mode = composeMode();
+  const explicit = mode === 'at';
   show($('compose-at'), explicit);
   $('compose-when').required = explicit;
-  $('compose-next').textContent = '';
-  if (!explicit) void previewNextSlot();
+  $('compose-next').textContent =
+    mode === 'draft' ? 'Saved without a time. Schedule it from the list below when you are ready.' : '';
+
+  const button = $('form-compose').querySelector('button[type=submit]');
+  if (button) button.textContent = mode === 'draft' ? 'Save draft' : 'Schedule';
+
+  if (mode === 'queue') void previewNextSlot();
 }
 
 for (const radio of document.querySelectorAll('input[name=when-mode]')) {
@@ -335,13 +341,19 @@ onSubmit($('form-compose'), async () => {
     });
 
     const target = result.targets[0];
-    const when = new Date(target?.scheduledAt);
-    const shifted =
-      target?.resolution === 'shifted'
-        ? ' The time you picked does not exist that day — the clocks skip it — so it will go out at the first moment that does.'
-        : '';
-    $('compose-ok').textContent =
-      `${target?.fromQueue ? 'Queued for' : 'Scheduled for'} ${when.toLocaleString()}.${shifted}`;
+    if (target === undefined) {
+      // A draft: accounts chosen, no time. There is nothing to announce a
+      // moment for, and inventing one would be worse than saying so.
+      $('compose-ok').textContent = 'Saved as a draft.';
+    } else {
+      const when = new Date(target.scheduledAt);
+      const shifted =
+        target.resolution === 'shifted'
+          ? ' The time you picked does not exist that day — the clocks skip it — so it will go out at the first moment that does.'
+          : '';
+      $('compose-ok').textContent =
+        `${target.fromQueue ? 'Queued for' : 'Scheduled for'} ${when.toLocaleString()}.${shifted}`;
+    }
     show($('compose-ok'), true);
     $('compose-body').value = '';
     $('counter').textContent = '0';
@@ -634,7 +646,102 @@ function renderPosts(posts) {
       status.append(why);
     }
     row.append(status);
+    row.append(actionsFor(post));
     body.append(row);
+  }
+}
+
+/**
+ * What can still be done to this post.
+ *
+ * Derived from the target's state rather than always shown: offering "cancel"
+ * on something already published is an invitation to click a button that
+ * cannot do what it says.
+ */
+function actionsFor(post) {
+  const cell = document.createElement('td');
+  const stoppable = ['pending', 'scheduled', 'failed', 'awaiting_reconnect'];
+  if (!stoppable.includes(post.target_status)) return cell;
+
+  const undated = post.target_status === 'pending' && post.scheduled_local === null;
+
+  const when = document.createElement('button');
+  when.type = 'button';
+  when.className = 'link';
+  when.textContent = undated ? 'Schedule' : 'Reschedule';
+  when.addEventListener('click', () => scheduleExisting(post));
+  cell.append(when);
+
+  const stop = document.createElement('button');
+  stop.type = 'button';
+  stop.className = 'link danger';
+  stop.textContent = undated ? 'Delete' : 'Cancel';
+  stop.addEventListener('click', () => stopPost(post, undated));
+  cell.append(stop);
+
+  return cell;
+}
+
+async function stopPost(post, isDraft) {
+  const verb = isDraft ? 'Delete this draft?' : 'Cancel this post so it does not go out?';
+  if (!confirm(verb)) return;
+
+  setError($('posts-error'), '');
+  try {
+    // Deleting hides a draft nobody has seen; cancelling stops a post but
+    // keeps it in the list, because "what happened to that post" is a question
+    // people ask afterwards.
+    const result = isDraft
+      ? await api(`/api/posts/${post.id}`, { method: 'DELETE' })
+      : await api(`/api/posts/${post.id}/cancel`, { method: 'POST', body: '{}' });
+
+    // Reported rather than assumed: a copy already being published cannot be
+    // recalled, and the person who just clicked cancel needs to know that
+    // before they see it appear.
+    if (result.inFlight > 0) {
+      setError(
+        $('posts-error'),
+        `${result.inFlight} copy was already being published and may still appear. It will not be attempted again.`,
+      );
+    }
+    await refresh();
+  } catch (error) {
+    setError($('posts-error'), error.message);
+  }
+}
+
+async function scheduleExisting(post) {
+  const suggestion = post.scheduled_local
+    ? String(post.scheduled_local).replace(' ', 'T').slice(0, 16)
+    : '';
+  const answer = prompt(
+    'New time as YYYY-MM-DDTHH:MM in the account’s timezone.\n' +
+      'Leave empty to use the next free time in the queue.',
+    suggestion,
+  );
+  // Cancelled the dialog. An empty string is a real answer — "use the queue" —
+  // so only null means "never mind".
+  if (answer === null) return;
+
+  setError($('posts-error'), '');
+  try {
+    const trimmed = answer.trim();
+    await api(`/api/posts/${post.id}/schedule`, {
+      method: 'POST',
+      body: JSON.stringify(
+        trimmed === ''
+          ? { mode: 'queue' }
+          : {
+              mode: 'at',
+              scheduledLocal: trimmed,
+              timezone: post.scheduled_timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
+            },
+      ),
+    });
+    await refresh();
+    if (composeMode() === 'queue') await previewNextSlot();
+  } catch (error) {
+    setError($('posts-error'), error.message);
   }
 }
 

@@ -48,12 +48,24 @@ export type Timing =
   /** The next free slot in each account's own posting queue. */
   | { readonly mode: 'queue'; readonly categoryId?: string | null | undefined };
 
+/**
+ * Timing including "not yet" — what a compose form can ask for.
+ *
+ * A draft is a target with accounts chosen and no time. Deliberately the same
+ * row as a scheduled target rather than a separate table: the dispatcher's
+ * claim requires `scheduled_at IS NOT NULL`, so an undated row is already
+ * invisible to it, and scheduling a draft becomes an UPDATE rather than a
+ * migration between two shapes. The alternative — drafts living somewhere
+ * else — makes every read of "my posts" a union, forever.
+ */
+export type RequestedTiming = Timing | { readonly mode: 'draft' };
+
 export interface ScheduleRequest {
   readonly profileGroupId: string;
   readonly body: string;
   readonly format: PostFormat;
   readonly socialProfileIds: readonly string[];
-  readonly timing: Timing;
+  readonly timing: RequestedTiming;
 }
 
 export interface ScheduledTarget {
@@ -66,22 +78,24 @@ export interface ScheduledTarget {
   readonly fromQueue: boolean;
 }
 
+export interface ScheduleFailure {
+  readonly ok: false;
+  readonly reason:
+    | 'validation_failed'
+    | 'unknown_profile'
+    | 'unschedulable_time'
+    | 'queue_unavailable';
+  readonly issues?: readonly ValidationIssue[] | undefined;
+  readonly message: string;
+}
+
 export type ScheduleResult =
   | {
       readonly ok: true;
       readonly postId: PostId;
       readonly targets: readonly ScheduledTarget[];
     }
-  | {
-      readonly ok: false;
-      readonly reason:
-        | 'validation_failed'
-        | 'unknown_profile'
-        | 'unschedulable_time'
-        | 'queue_unavailable';
-      readonly issues?: readonly ValidationIssue[] | undefined;
-      readonly message: string;
-    };
+  | ScheduleFailure;
 
 /** Parse "YYYY-MM-DDTHH:MM" into a wall clock. Rejects anything else. */
 export function parseWallClock(value: string): WallClock | undefined {
@@ -103,7 +117,7 @@ export function parseWallClock(value: string): WallClock | undefined {
 }
 
 /** A profile plus the instant this post will go out on it. */
-interface Placement {
+export interface Placement {
   readonly profileId: string;
   readonly network: string;
   readonly instant: Date;
@@ -111,6 +125,12 @@ interface Placement {
   readonly timezone: string;
   readonly resolution: 'exact' | 'ambiguous' | 'shifted';
   readonly slotId: string | null;
+}
+
+/** The only parts of a request that decide *when* something goes out. */
+export interface Placeable {
+  readonly format: PostFormat;
+  readonly timing: Timing;
 }
 
 /**
@@ -121,14 +141,17 @@ interface Placement {
  * literally the account's own week. "09:00 local to each audience" is the
  * feature that falls out of doing this per account, and it is the reason the
  * loop is not hoisted out.
+ *
+ * Exported because rescheduling needs exactly this and nothing else. A second
+ * implementation over there would be a second set of daylight-saving bugs.
  */
-async function placeTargets(
+export async function placeTargets(
   sql: Sql,
   organizationId: OrganizationId,
-  request: ScheduleRequest,
+  request: Placeable,
   profiles: readonly { id: string; network: string; timezone: string | null; group_timezone: string }[],
   now: Date,
-): Promise<{ ok: true; placements: readonly Placement[] } | { ok: false; result: ScheduleResult }> {
+): Promise<{ ok: true; placements: readonly Placement[] } | { ok: false; result: ScheduleFailure }> {
   const placements: Placement[] = [];
 
   for (const profile of profiles) {
@@ -296,14 +319,59 @@ export async function schedulePost(
     media: [],
   });
 
+  // Narrowed through a local: the closures below capture `request`, which
+  // costs the narrowing of a property access on it.
+  const timing: RequestedTiming = request.timing;
+
+  // A draft skips placement entirely: it has accounts and no time, and asking
+  // a queue for a slot it is not going to use would take that slot off the
+  // board for everyone else.
+  if (timing.mode === 'draft') {
+    return sql.begin(async (tx) => {
+      const [post] = await tx<{ id: string }[]>`
+        INSERT INTO posts (organization_id, profile_group_id, format, body, status)
+        VALUES (${organizationId}, ${request.profileGroupId}, ${request.format}, ${request.body}, 'draft')
+        RETURNING id
+      `;
+      if (post === undefined) throw new Error('Post insert returned no row');
+
+      const [version] = await tx<{ id: string }[]>`
+        INSERT INTO post_versions (organization_id, post_id, version, content_hash, body)
+        VALUES (${organizationId}, ${post.id}, 1, ${hash}, ${request.body})
+        RETURNING id
+      `;
+      if (version === undefined) throw new Error('Version insert returned no row');
+
+      for (const profile of profiles) {
+        await tx`
+          INSERT INTO post_targets (
+            organization_id, post_id, post_version_id, social_profile_id,
+            network, format, status, dispatch
+          )
+          VALUES (
+            ${organizationId}, ${post.id}, ${version.id}, ${profile.id},
+            ${profile.network}, ${request.format}, 'pending', 'our_dispatcher'
+          )
+        `;
+      }
+
+      return {
+        ok: true as const,
+        postId: unsafeId<'PostId'>(post.id) as PostId,
+        targets: [],
+      };
+    });
+  }
+
   // Two people adding to the same queue at the same moment both see the same
   // free slot. The database refuses the second one; the fix is to look again
   // rather than to fail, because by then the next slot really is free. Bounded,
   // because a loop that retries forever turns a contended queue into a hang.
-  const attempts = request.timing.mode === 'queue' ? 3 : 1;
+  const attempts = timing.mode === 'queue' ? 3 : 1;
+  const placeable: Placeable = { format: request.format, timing };
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    const placed = await placeTargets(sql, organizationId, request, profiles, now);
+    const placed = await placeTargets(sql, organizationId, placeable, profiles, now);
     if (!placed.ok) return placed.result;
 
     try {

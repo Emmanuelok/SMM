@@ -302,6 +302,61 @@ describe('the publish dispatcher, against Postgres', { skip: url === undefined ?
     }
   });
 
+  test('a post cancelled while in flight is not resurrected by the reclaim', async () => {
+    await fixture();
+    try {
+      const now = new Date();
+      const targetId = await dueTarget(new Date(now.getTime() - 60_000));
+
+      // The exact sequence that produces the worst outcome a scheduler can
+      // produce: claimed by a worker, cancelled by its owner while claimed,
+      // then the worker dies. Without the request being honoured here, the
+      // reclaim puts it back and it publishes an hour after being called off.
+      await claimDueTargets(sql, 10, now);
+      await sql`
+        UPDATE post_targets SET cancel_requested_at = now() WHERE id = ${targetId}
+      `;
+
+      const later = new Date(now.getTime() + 700_000);
+      await reclaimStalled(sql, 600_000, later);
+
+      const after = await statusOf(targetId);
+      assert.equal(after.status, 'cancelled', 'a cancelled post must not go back in the queue');
+      assert.equal(after.next_attempt_at, null);
+
+      // And nothing picks it up even if something else puts it back.
+      let submits = 0;
+      await sql`UPDATE post_targets SET status = 'scheduled' WHERE id = ${targetId}`;
+      await runOnce({
+        sql,
+        adapters: new AdapterRegistry().register(stubAdapter({ submitted: () => (submits += 1) })),
+        now: () => later,
+      });
+      assert.equal(submits, 0, 'the claim must refuse a row whose cancellation was recorded');
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test('an ordinary stalled row still goes back in the queue', async () => {
+    await fixture();
+    try {
+      const now = new Date();
+      const targetId = await dueTarget(new Date(now.getTime() - 60_000));
+      await claimDueTargets(sql, 10, now);
+
+      // No cancellation: the recovery must still work, or honouring the
+      // cancellation would have cost the crash-safety it sits inside.
+      await reclaimStalled(sql, 600_000, new Date(now.getTime() + 700_000));
+
+      const after = await statusOf(targetId);
+      assert.equal(after.status, 'scheduled');
+      assert.equal(after.failure_kind, 'interrupted');
+    } finally {
+      await cleanup();
+    }
+  });
+
   test('a transient failure is deferred with a time to try again', async () => {
     await fixture();
     try {

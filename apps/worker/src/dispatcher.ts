@@ -96,6 +96,11 @@ export async function claimDueTargets(
       JOIN posts p ON p.id = t.post_id
       LEFT JOIN post_versions v ON v.id = t.post_version_id
       WHERE t.dispatch = 'our_dispatcher'
+        -- Belt and braces. Cancelling moves a stoppable row straight out of
+        -- the queue, so this only catches one cancelled while in flight and
+        -- since recovered — but a claim is the last place to discover that a
+        -- post was called back.
+        AND t.cancel_requested_at IS NULL
         AND (
           (t.status IN ('scheduled', 'pending')
             AND t.scheduled_at IS NOT NULL
@@ -144,6 +149,12 @@ export async function claimDueTargets(
  * have gone out. It is returned to the queue rather than retried blindly,
  * because the safe move is to read back what actually happened before writing
  * again — a duplicate cannot be undone, while a delayed post can.
+ *
+ * Unless it was cancelled in the meantime. Someone who hit cancel while their
+ * post was in flight was told it might still go out — being told that and then
+ * watching it publish an hour later, because a worker happened to die and the
+ * reclaim put it back, is the worst outcome this function can produce. The
+ * request outranks the recovery.
  */
 export async function reclaimStalled(
   sql: Sql,
@@ -153,9 +164,23 @@ export async function reclaimStalled(
   const cutoff = new Date(now.getTime() - stalledAfterMs);
   const rows = await sql<{ id: string }[]>`
     UPDATE post_targets
-    SET status = 'scheduled',
-        failure_kind = 'interrupted',
-        failure_message = 'A worker stopped mid-publish. Verifying before retrying.',
+    SET status = CASE
+          WHEN cancel_requested_at IS NOT NULL THEN 'cancelled'::target_status
+          ELSE 'scheduled'::target_status
+        END,
+        next_attempt_at = CASE
+          WHEN cancel_requested_at IS NOT NULL THEN NULL
+          ELSE next_attempt_at
+        END,
+        failure_kind = CASE
+          WHEN cancel_requested_at IS NOT NULL THEN 'cancelled'
+          ELSE 'interrupted'
+        END,
+        failure_message = CASE
+          WHEN cancel_requested_at IS NOT NULL
+            THEN 'Cancelled while it was being published.'
+          ELSE 'A worker stopped mid-publish. Verifying before retrying.'
+        END,
         updated_at = now()
     WHERE status = 'publishing' AND updated_at < ${cutoff}
     RETURNING id

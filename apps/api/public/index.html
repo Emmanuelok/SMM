@@ -133,6 +133,10 @@
                 <input type="radio" name="when-mode" value="at" />
                 A time I pick
               </label>
+              <label class="choice">
+                <input type="radio" name="when-mode" value="draft" />
+                Save as a draft — decide later
+              </label>
             </fieldset>
 
             <p id="compose-next" class="hint"></p>
@@ -213,10 +217,12 @@
               <th>Account</th>
               <th>When</th>
               <th>Status</th>
+              <th><span class="sr-only">Actions</span></th>
             </tr>
           </thead>
           <tbody id="posts"></tbody>
         </table>
+        <p id="posts-error" class="error" role="alert" hidden></p>
         <p id="posts-empty" class="muted" hidden>Nothing scheduled yet.</p>
       </section>
     </div>

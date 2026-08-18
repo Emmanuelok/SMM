@@ -384,3 +384,34 @@ button.secondary:hover {
   border-color: var(--accent);
   color: var(--accent);
 }
+
+/* --- post actions --------------------------------------------------------- */
+
+/*
+ * Visible to a screen reader, not on screen. The actions column has no useful
+ * heading text, but a table header that is simply empty leaves the column
+ * unnamed for anyone navigating by header.
+ */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+td .link {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 13px;
+  text-align: left;
+}
+
+/* Destructive actions read as destructive before they are clicked. */
+.link.danger {
+  color: var(--error);
+}

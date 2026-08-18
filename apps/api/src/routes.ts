@@ -9,7 +9,8 @@ import type { Vault } from '@smm/vault';
 
 import type { AuthenticatedUser } from './auth.js';
 import { OAuthStateStore, saveConnection } from './oauth.js';
-import { schedulePost, type Timing } from './publishing.js';
+import { cancelPost, deletePost, reschedulePost } from './posts.js';
+import { schedulePost, type RequestedTiming, type Timing } from './publishing.js';
 import { ensureSchedule, previewQueue, replaceSlots, setPaused } from './queues.js';
 
 /**
@@ -17,6 +18,23 @@ import { ensureSchedule, previewQueue, replaceSlots, setPaused } from './queues.
  * type error from the driver — a 500 for what is really a 404.
  */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** The wire shape of a timing choice, turned into the internal one. */
+function timingFrom(body: {
+  mode: 'at' | 'queue' | 'draft';
+  scheduledLocal?: string | undefined;
+  timezone?: string | undefined;
+  categoryId?: string | undefined;
+}): RequestedTiming {
+  if (body.mode === 'draft') return { mode: 'draft' };
+  if (body.mode === 'queue') return { mode: 'queue', categoryId: body.categoryId ?? null };
+  return {
+    mode: 'at',
+    // Both are present: the schema refuses `at` without them.
+    scheduledLocal: body.scheduledLocal ?? '',
+    timezone: body.timezone ?? '',
+  };
+}
 
 /**
  * Connecting accounts, and composing posts.
@@ -47,13 +65,26 @@ const scheduleSchema = z
     body: z.string().min(1).max(10_000),
     format: z.enum(['text', 'image']).default('text'),
     socialProfileIds: z.array(z.string().uuid()).min(1).max(50),
+    mode: z.enum(['at', 'queue', 'draft']).default('at'),
+    scheduledLocal: z.string().min(10).max(20).optional(),
+    timezone: z.string().min(1).max(64).optional(),
+    categoryId: z.string().uuid().optional(),
+  })
+  .refine(
+    (value) => value.mode !== 'at' || (value.scheduledLocal !== undefined && value.timezone !== undefined),
+    { message: 'A scheduled post needs both a local time and a timezone.', path: ['scheduledLocal'] },
+  );
+
+/** Rescheduling takes the same timing choices, minus "not yet". */
+const retimeSchema = z
+  .object({
     mode: z.enum(['at', 'queue']).default('at'),
     scheduledLocal: z.string().min(10).max(20).optional(),
     timezone: z.string().min(1).max(64).optional(),
     categoryId: z.string().uuid().optional(),
   })
   .refine(
-    (value) => value.mode === 'queue' || (value.scheduledLocal !== undefined && value.timezone !== undefined),
+    (value) => value.mode !== 'at' || (value.scheduledLocal !== undefined && value.timezone !== undefined),
     { message: 'A scheduled post needs both a local time and a timezone.', path: ['scheduledLocal'] },
   );
 
@@ -380,15 +411,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     }
 
     const body = parsed.data;
-    const timing: Timing =
-      body.mode === 'queue'
-        ? { mode: 'queue', categoryId: body.categoryId ?? null }
-        : {
-            mode: 'at',
-            // Both are present: the schema refuses `at` without them.
-            scheduledLocal: body.scheduledLocal ?? '',
-            timezone: body.timezone ?? '',
-          };
+    const timing: RequestedTiming = timingFrom(body);
 
     const result = await schedulePost(sql, user.organizationId as OrganizationId, {
       profileGroupId: body.profileGroupId,
@@ -502,6 +525,69 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     if (!updated) return reply.code(404).send({ error: 'unknown_profile' });
 
     return reply.send({ paused: parsed.data.paused });
+  });
+
+  /**
+   * Stop a post going out.
+   *
+   * Answers with what actually happened per copy rather than a bare 204,
+   * because "cancelled" and "too late, it is already publishing" are different
+   * facts and the person who just clicked cancel is entitled to know which one
+   * they got.
+   */
+  app.post('/api/posts/:id/cancel', async (request, reply) => {
+    const user = await requireUser(request, reply);
+    if (user === undefined) return reply;
+
+    const { id } = request.params as { id: string };
+    if (!UUID.test(id)) return reply.code(404).send({ error: 'unknown_post' });
+
+    const result = await cancelPost(sql, user.organizationId as OrganizationId, id);
+    if (!result.ok) return reply.code(404).send({ error: result.reason, message: result.message });
+
+    return reply.send(result.value);
+  });
+
+  /**
+   * Give a post a new time — or a draft its first one.
+   *
+   * One route for both, because they are the same operation on rows that
+   * differ only in whether they already carry a time.
+   */
+  app.post('/api/posts/:id/schedule', async (request, reply) => {
+    const user = await requireUser(request, reply);
+    if (user === undefined) return reply;
+
+    const { id } = request.params as { id: string };
+    if (!UUID.test(id)) return reply.code(404).send({ error: 'unknown_post' });
+
+    const parsed = retimeSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'invalid_request', issues: parsed.error.issues });
+    }
+
+    const timing = timingFrom(parsed.data) as Timing;
+    const result = await reschedulePost(sql, user.organizationId as OrganizationId, id, timing);
+
+    if (!result.ok) {
+      const code = result.reason === 'unknown_post' ? 404 : 400;
+      return reply.code(code).send({ error: result.reason, message: result.message });
+    }
+    return reply.send(result.value);
+  });
+
+  /** Remove a post from view, cancelling anything still pending first. */
+  app.delete('/api/posts/:id', async (request, reply) => {
+    const user = await requireUser(request, reply);
+    if (user === undefined) return reply;
+
+    const { id } = request.params as { id: string };
+    if (!UUID.test(id)) return reply.code(404).send({ error: 'unknown_post' });
+
+    const result = await deletePost(sql, user.organizationId as OrganizationId, id);
+    if (!result.ok) return reply.code(404).send({ error: result.reason, message: result.message });
+
+    return reply.send(result.value);
   });
 
   app.get('/api/posts', async (request, reply) => {
