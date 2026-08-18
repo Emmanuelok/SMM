@@ -9,6 +9,7 @@ import type { Vault } from '@smm/vault';
 
 import type { AuthenticatedUser } from './auth.js';
 import { OAuthStateStore, saveConnection } from './oauth.js';
+import { postPerformance, readingHistory } from './analytics.js';
 import { cancelPost, deletePost, reschedulePost } from './posts.js';
 import { schedulePost, type RequestedTiming, type Timing } from './publishing.js';
 import { ensureSchedule, previewQueue, replaceSlots, setPaused } from './queues.js';
@@ -525,6 +526,48 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     if (!updated) return reply.code(404).send({ error: 'unknown_profile' });
 
     return reply.send({ paused: parsed.data.paused });
+  });
+
+  /**
+   * How published posts are doing.
+   *
+   * Only what a platform actually published: a metric no network reports is
+   * absent rather than zero, because a zero in an impressions column reads as
+   * "nobody saw it" instead of "we were never told".
+   */
+  app.get('/api/analytics', async (request, reply) => {
+    const user = await requireUser(request, reply);
+    if (user === undefined) return reply;
+
+    const query = request.query as { days?: string; limit?: string };
+    const days = Number(query.days ?? 30);
+    const limit = Number(query.limit ?? 50);
+
+    return reply.send(
+      await postPerformance(sql, user.organizationId as OrganizationId, {
+        sinceDays: Number.isFinite(days) ? days : 30,
+        limit: Number.isFinite(limit) ? limit : 50,
+      }),
+    );
+  });
+
+  /**
+   * Every reading ever taken of one published post.
+   *
+   * The answer to "why is last month's number different now" — platforms
+   * restate figures for days afterwards, and without the history the only
+   * honest reply is that we do not know.
+   */
+  app.get('/api/analytics/targets/:id/history', async (request, reply) => {
+    const user = await requireUser(request, reply);
+    if (user === undefined) return reply;
+
+    const { id } = request.params as { id: string };
+    if (!UUID.test(id)) return reply.code(404).send({ error: 'unknown_target' });
+
+    return reply.send({
+      readings: await readingHistory(sql, user.organizationId as OrganizationId, id),
+    });
   });
 
   /**

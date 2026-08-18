@@ -415,3 +415,44 @@ td .link {
 .link.danger {
   color: var(--error);
 }
+
+/* --- performance ---------------------------------------------------------- */
+
+.totals {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 10px;
+  margin: 14px 0 18px;
+}
+
+.tile {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.tile strong {
+  font-size: 22px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+.tile span {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+/* Figures line up when they share a column width, and only then. */
+td.number {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+#analytics-table th:not(:first-child):not(:nth-child(2)) {
+  text-align: right;
+}

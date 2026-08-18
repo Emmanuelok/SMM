@@ -30,7 +30,7 @@ import {
   type PublishPhase,
   type SingleShotHandle,
 } from '../lifecycle.js';
-import type { PostVisibility } from '../metrics.js';
+import type { DateRange, PostVisibility, RawMetric } from '../metrics.js';
 import type { NetworkId } from '../networks.js';
 import { BLUESKY } from '../registry.js';
 
@@ -51,6 +51,38 @@ import { BLUESKY } from '../registry.js';
 
 const DEFAULT_SERVICE = 'https://bsky.social';
 const POST_COLLECTION = 'app.bsky.feed.post';
+
+/**
+ * How `getPosts` versions itself.
+ *
+ * The AT Protocol versions by lexicon rather than by a number in the path, so
+ * there is no `v2` to record. Stored as the lexicon id because that is the
+ * thing that actually changes when the shape of the response changes — and
+ * "unversioned" recorded explicitly beats an empty column nobody can interpret
+ * in two years.
+ */
+const BLUESKY_API_VERSION = 'app.bsky.feed.defs#postView';
+
+/** `getPosts` accepts at most 25 URIs per call. */
+const GET_POSTS_LIMIT = 25;
+
+/**
+ * The counters a post view carries.
+ *
+ * Named exactly as Bluesky names them, because the stored field is the join key
+ * back to what the number meant. Bluesky publishes no impressions or reach at
+ * any tier; inventing them from these would be a guess wearing a metric's name.
+ */
+const COUNT_FIELDS = ['likeCount', 'repostCount', 'replyCount', 'quoteCount'] as const;
+
+/** Only the parts of `app.bsky.feed.defs#postView` that carry numbers. */
+interface PostView {
+  readonly uri: string;
+  readonly likeCount?: number;
+  readonly repostCount?: number;
+  readonly replyCount?: number;
+  readonly quoteCount?: number;
+}
 
 /**
  * Resolves a credential reference to the secret it stands for.
@@ -380,11 +412,22 @@ export class BlueskyAdapter implements PlatformAdapter {
       readonly body?: unknown;
       readonly token?: string | undefined;
       readonly query?: Readonly<Record<string, string>> | undefined;
+      /**
+       * Parameters XRPC takes as an array, sent as a repeated key.
+       *
+       * Separate from `query` because the two need different methods on
+       * URLSearchParams — `set` replaces, `append` accumulates — and using the
+       * wrong one turns a request for twenty-five posts into a request for one.
+       */
+      readonly repeatedQuery?: Readonly<Record<string, readonly string[]>> | undefined;
     } = {},
   ): Promise<T> {
     const url = new URL(`/xrpc/${procedure}`, this.#service);
     for (const [key, value] of Object.entries(options.query ?? {})) {
       url.searchParams.set(key, value);
+    }
+    for (const [key, values] of Object.entries(options.repeatedQuery ?? {})) {
+      for (const value of values) url.searchParams.append(key, value);
     }
 
     const headers: Record<string, string> = { accept: 'application/json' };
@@ -627,6 +670,74 @@ export class BlueskyAdapter implements PlatformAdapter {
       }
       return { state: 'unavailable', reason: classified.message };
     }
+  }
+
+  /**
+   * Engagement counts, exactly as Bluesky returns them.
+   *
+   * `getPosts` takes up to 25 AT URIs at a time and answers with the post views
+   * including their counters, so a whole day's posts usually cost one call.
+   *
+   * Everything Bluesky publishes here is **cumulative**: `likeCount` is the
+   * running total on the record, not likes in a window. Recording that
+   * correctly matters more than it looks — a cumulative reading summed across
+   * thirty days produces a number thirty times too large, and it is the exact
+   * mistake that makes an analytics product confidently wrong. The window
+   * argument is therefore ignored rather than pretended to be honoured: filter
+   * a cumulative counter by date and you get a smaller wrong number instead of
+   * an obviously wrong one.
+   *
+   * The field names are passed through unchanged, typos and all. Bluesky has no
+   * impressions or reach API at any tier, so those are absent rather than
+   * approximated from what is here.
+   */
+  async fetchMetrics(
+    connection: Connection,
+    ids: readonly RemoteId[],
+    _window: DateRange,
+  ): Promise<readonly RawMetric[]> {
+    if (ids.length === 0) return [];
+
+    const session = await this.#session(connection);
+    const collectedAt = new Date();
+    const metrics: RawMetric[] = [];
+
+    for (let start = 0; start < ids.length; start += GET_POSTS_LIMIT) {
+      const batch = ids.slice(start, start + GET_POSTS_LIMIT);
+      const response = await this.#call<{ posts?: readonly PostView[] }>(
+        'GET',
+        'app.bsky.feed.getPosts',
+        {
+          token: session.accessJwt,
+          // Repeated key, which is how XRPC takes an array. URLSearchParams.set
+          // would keep only the last one and silently fetch a single post.
+          query: {},
+          repeatedQuery: { uris: [...batch] },
+        },
+      );
+
+      for (const post of response.posts ?? []) {
+        for (const field of COUNT_FIELDS) {
+          const value = post[field];
+          // Absent is not zero. Bluesky omits a counter it has not computed,
+          // and writing a zero would put a real dip on a client's chart.
+          if (typeof value !== 'number') continue;
+
+          metrics.push({
+            subjectType: 'post',
+            subjectId: post.uri,
+            fieldAsReturned: field,
+            value,
+            endpoint: 'app.bsky.feed.getPosts',
+            apiVersion: BLUESKY_API_VERSION,
+            measureKind: 'cumulative',
+            collectedAt,
+          });
+        }
+      }
+    }
+
+    return metrics;
   }
 
   async deletePost(

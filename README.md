@@ -11,8 +11,8 @@ publish it.
 
 | | |
 |---|---|
-| **Works** | Web UI, signup, login, sessions, connecting Bluesky and Mastodon accounts, composing, posting queues, scheduling, the publish worker |
-| **Built, not wired** | Metrics ingestion, approvals, content recycling, media renditions, the rights ledger |
+| **Works** | Web UI, signup, login, sessions, connecting Bluesky and Mastodon accounts, composing, drafts, posting queues, scheduling, cancelling and rescheduling, the publish worker, metrics collection and performance reporting |
+| **Built, not wired** | Approvals, content recycling, media renditions, the rights ledger |
 | **Not started** | Networks beyond Bluesky and Mastodon, media storage, email, billing |
 
 Two networks. Every other one parks its posts with a clear reason rather than
@@ -120,7 +120,20 @@ deliberately pinned to the same minute stay legal.
 **Metrics carry provenance from the first row.** Platform retention windows are
 short — Pinterest 90 days, X 30, TikTok around 60 — so uncaptured data is
 unrecoverable, and provenance added later leaves the back catalogue
-unattributable.
+unattributable. Adapters return the platform's own field name, endpoint and API
+version, and all three are stored beside the value; the mapping into a
+cross-network vocabulary happens on the way *out*. That is what turns a platform
+redefining a metric into a dated annotation on a chart rather than an
+unexplainable cliff in a number a client has seen every month for two years.
+
+**Readings are appended, never updated, and a cumulative counter is never
+summed.** Platforms restate figures for days afterwards, so overwriting
+yesterday's reading destroys the evidence that the platform changed its mind.
+And Bluesky's `likeCount` is a running total on the record — adding thirty daily
+readings gives a number thirty times too large that still looks entirely
+plausible on a chart. A metric no platform published is absent rather than zero,
+because a zero in an impressions column reads as "nobody saw it" instead of "we
+were never told".
 
 **Migrations are the schema contract.** No ORM: model definitions would be a
 second description of the same thing, free to drift from the first.

@@ -3,6 +3,7 @@ import { CredentialVault, blueskyCredentials, mastodonCredentials } from '@smm/c
 import { createDatabase, databaseUrlFromEnv, shouldUseSsl } from '@smm/db';
 import { EnvKeyProvider, Vault } from '@smm/vault';
 
+import { collectOnce } from './collector.js';
 import { runOnce } from './dispatcher.js';
 
 /**
@@ -18,6 +19,15 @@ import { runOnce } from './dispatcher.js';
 
 const POLL_INTERVAL_MS = Number(process.env['WORKER_POLL_INTERVAL_MS'] ?? 5_000);
 const BATCH_SIZE = Number(process.env['WORKER_BATCH_SIZE'] ?? 10);
+
+/**
+ * How often to look for posts whose numbers are worth re-reading.
+ *
+ * Five minutes between *passes*, not between readings of a given post — the
+ * collector decides that per post from its age. This only bounds how quickly a
+ * post that has just become due is noticed.
+ */
+const COLLECT_INTERVAL_MS = Number(process.env['WORKER_COLLECT_INTERVAL_MS'] ?? 300_000);
 
 function log(level: 'info' | 'error', message: string, extra: Record<string, unknown> = {}): void {
   // Structured single-line JSON, because Railway's log view is line-oriented and
@@ -88,6 +98,12 @@ async function main(): Promise<void> {
 
   log('info', 'worker started', { pollIntervalMs: POLL_INTERVAL_MS, batchSize: BATCH_SIZE });
 
+  // Collection runs on its own, much slower clock. Engagement accrues over
+  // days, so reading it at the publishing cadence would spend quota rewriting
+  // the same numbers — and quota spent there is unavailable when a post takes
+  // off and its numbers actually move.
+  let nextCollectionAt = 0;
+
   while (running) {
     try {
       const outcomes = await runOnce({ sql, adapters }, BATCH_SIZE);
@@ -105,6 +121,28 @@ async function main(): Promise<void> {
       log('error', 'dispatch pass failed', {
         error: error instanceof Error ? error.message : String(error),
       });
+    }
+
+    if (Date.now() >= nextCollectionAt) {
+      nextCollectionAt = Date.now() + COLLECT_INTERVAL_MS;
+      try {
+        for (const outcome of await collectOnce({ sql, adapters })) {
+          log('info', 'collect', {
+            profile: outcome.socialProfileId,
+            network: outcome.network,
+            posts: outcome.posts,
+            readings: outcome.readings,
+            ...(outcome.failed === undefined ? {} : { failed: outcome.failed }),
+          });
+        }
+      } catch (error) {
+        // Deliberately its own try block. Measuring is worth strictly less than
+        // publishing, and a metrics outage must never be able to stop a post
+        // going out.
+        log('error', 'collection pass failed', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
 
     // Sleep in short slices so a shutdown signal is honoured promptly instead

@@ -760,13 +760,112 @@ function fillTimezones() {
   }
 }
 
+// --- performance -------------------------------------------------------------
+
+/** Plural forms that are not just the word plus an s. */
+const METRIC_LABELS = { likes: 'Likes', comments: 'Comments', shares: 'Shares', quotes: 'Quotes' };
+
+function renderAnalytics(summary) {
+  const card = $('analytics-card');
+  show(card, summary.publishedCount > 0);
+  if (summary.publishedCount === 0) return;
+
+  const head = $('analytics-head');
+  const rows = $('analytics-rows');
+  head.innerHTML = '';
+  rows.innerHTML = '';
+
+  for (const label of ['Post', 'Account']) {
+    const th = document.createElement('th');
+    th.textContent = label;
+    head.append(th);
+  }
+  // Only columns something actually reported. A column of dashes reads as
+  // "zero" and there is no honest zero for a number nobody published.
+  for (const column of summary.columns) {
+    const th = document.createElement('th');
+    th.textContent = METRIC_LABELS[column] ?? column;
+    head.append(th);
+  }
+
+  const totals = $('analytics-totals');
+  totals.innerHTML = '';
+  for (const column of summary.columns) {
+    const tile = document.createElement('div');
+    tile.className = 'tile';
+
+    const value = document.createElement('strong');
+    value.textContent = String(summary.totals[column] ?? 0);
+    tile.append(value);
+
+    const label = document.createElement('span');
+    label.textContent = METRIC_LABELS[column] ?? column;
+    tile.append(label);
+    totals.append(tile);
+  }
+
+  const notes = [`${summary.publishedCount} published in the last 30 days.`];
+  if (summary.unmeasuredNetworks.length > 0) {
+    // Said out loud, because a blank row otherwise reads as a post that failed
+    // rather than a network that reports nothing.
+    notes.push(
+      `${summary.unmeasuredNetworks.join(' and ')} publishes no metrics to third parties, so those rows stay empty.`,
+    );
+  }
+  $('analytics-note').textContent = notes.join(' ');
+
+  // Best first: the question people open this for is which post worked.
+  const ranked = [...summary.posts].sort((a, b) => b.engagement - a.engagement);
+
+  for (const post of ranked) {
+    const row = document.createElement('tr');
+
+    const text = document.createElement('td');
+    if (post.remoteUrl) {
+      const link = document.createElement('a');
+      link.href = post.remoteUrl;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.textContent = post.body.length > 60 ? `${post.body.slice(0, 60)}…` : post.body;
+      text.append(link);
+    } else {
+      text.textContent = post.body.length > 60 ? `${post.body.slice(0, 60)}…` : post.body;
+    }
+    if (post.measuredAt) {
+      const when = document.createElement('div');
+      when.className = 'hint';
+      when.textContent = `Read ${new Date(post.measuredAt).toLocaleString()}`;
+      text.append(when);
+    }
+    row.append(text);
+
+    const account = document.createElement('td');
+    account.textContent = post.handle ?? post.network;
+    row.append(account);
+
+    for (const column of summary.columns) {
+      const cell = document.createElement('td');
+      const value = post.metrics[column];
+      // An em dash, not a zero: the platform said nothing about this one.
+      cell.textContent = value === undefined ? '—' : String(value);
+      cell.className = 'number';
+      row.append(cell);
+    }
+
+    rows.append(row);
+  }
+}
+
 async function refresh() {
-  const [{ socialProfiles }, { posts }] = await Promise.all([
+  const [{ socialProfiles }, { posts }, analytics] = await Promise.all([
     api('/api/social-profiles'),
     api('/api/posts'),
+    // Never fatal: the rest of the page is more important than the numbers.
+    api('/api/analytics').catch(() => ({ publishedCount: 0, posts: [], columns: [], totals: {}, unmeasuredNetworks: [] })),
   ]);
   renderProfiles(socialProfiles);
   renderPosts(posts);
+  renderAnalytics(analytics);
   if (socialProfiles.length > 0) await loadQueue();
 }
 
